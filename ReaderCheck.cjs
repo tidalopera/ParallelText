@@ -53,12 +53,14 @@ async function run() {
   const win = new Element();
   Object.assign(win, { innerHeight: 900, scrollY: 0, getSelection: () => null });
   let failure = false;
+  let expireOnce = false;
   const requests = [];
   const context = {
     document: doc, window: win, console, AbortController, DOMException, setTimeout, clearTimeout, queueMicrotask,
     requestAnimationFrame: () => 1,
     fetch: async (url, options = {}) => {
       if (url === "/api/book") return { ok: true, json: async () => ({ title: "Test", paragraphs, voices: [] }) };
+      if (url.startsWith("/api/speech?key=")) return { ok: false, status: 404, json: async () => ({ message:"expired" }) };
       if (url === "/api/prefetch") {
         const { index, count } = JSON.parse(options.body);
         assert.equal(count, 6);
@@ -68,6 +70,7 @@ async function run() {
       assert.equal(url, "/api/speech");
       const { index } = JSON.parse(options.body); requests.push(index);
       assert.equal(hasSpeech(paragraphs[index].english), true, "must never request punctuation-only speech");
+      if (expireOnce) { expireOnce = false; return { ok:true, json:async()=>({state:"pending",key:"stale"}) }; }
       return { ok: true, json: async () => failure ? { state: "error", message: "network test" } : { state: "ready", words: [], audio: `/audio/${index}.mp3` } };
     },
   };
@@ -78,7 +81,9 @@ async function run() {
   assert.equal(audio.src, "/audio/3.mp3", "start at consecutive punctuation then continue");
   assert.equal(audio.paused, false);
   assert.deepEqual(requests, [3], "foreground requests only the current paragraph");
-  audio.paused = true; audio.emit("ended"); await flush();
+  expireOnce = true;
+  audio.paused = true; audio.emit("ended");
+  await new Promise(resolve=>setTimeout(resolve,1100)); await flush();
   assert.equal(audio.src, "/audio/5.mp3", "autoplay crosses punctuation");
   get("previous").emit("click"); await flush();
   assert.equal(audio.src, "/audio/3.mp3", "previous travels backward across punctuation");

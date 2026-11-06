@@ -67,6 +67,8 @@
       const job = data.preparation || {};
       const labels = { "preparing":"预生成中", "paused-resources":"资源忙，已暂停", "cache-full":"缓存已满", "complete":"已到全文末尾", "error":"预生成出错", "idle":"待机" };
       $("cacheStatus").textContent = `音频缓存 ${(data.bytes / 1e6).toFixed(1)} / ${(data.limitBytes / 1e6).toFixed(0)} MB · ${labels[job.state] || job.state}${Number.isInteger(job.next) ? ` · 第 ${job.next + 1} 段` : ""}${job.message ? ` · ${job.message}` : ""}`;
+      if (data.repairs?.state === "regenerating") $("cacheStatus").textContent += ` · 修订音频重建 ${data.repairs.done}/${data.repairs.total}`;
+      if (loading && $("voice").value === "furina-local-en" && data.resources?.busy) status("资源紧张，等待恢复后生成本段；已缓存段落可直接播放");
     } catch (_) {}
     if (!stopped) setTimeout(pollCache, 5000);
   }
@@ -215,19 +217,24 @@
   }
   async function speechReady(i, voice, signal) {
     const deadline = Date.now() + (voice === "furina-local-en" ? 1200000 : 85000);
-    let result;
-    while (!result) {
-      try { result = await requestParagraph(i, voice, signal); }
-      catch (error) { if (error.code !== 429) throw error; await sleep(700, signal); }
-      if (Date.now() > deadline) throw new Error("语音生成超时，请重试。");
-    }
-    while (result.state === "pending") {
-      if (Date.now() > deadline) throw new Error("语音生成超时，请重试。");
+    let result = null;
+    while (Date.now() <= deadline) {
+      try {
+        result = result?.state === "pending"
+          ? await jsonRequest(`/api/speech?key=${encodeURIComponent(result.key)}`, { signal })
+          : await requestParagraph(i, voice, signal);
+      } catch (error) {
+        if (![404,429,503].includes(error.code) && !(error instanceof TypeError)) throw error;
+        status("语音缓存正在重建或重新连接，请稍候…");
+        result = null;
+        await sleep(700, signal);
+        continue;
+      }
+      if (result.state === "ready" || result.state === "skipped") return result;
+      if (result.state !== "pending") throw new Error(result.message || "语音生成失败。");
       await sleep(250, signal);
-      result = await jsonRequest(`/api/speech?key=${encodeURIComponent(result.key)}`, { signal });
     }
-    if (result.state !== "ready" && result.state !== "skipped") throw new Error(result.message || "语音生成失败。");
-    return result;
+    throw new Error("语音生成超时，请重试。");
   }
 
   function loadAudio(source, signal) {

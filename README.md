@@ -31,6 +31,8 @@ If `Work/Book/Aligned.json` exists, the default reader and Windows launcher load
 
 For online voices, the player generates the next six speakable paragraphs while preparing the current paragraph. Separate foreground workers and promotion of queued jobs keep speculative work from blocking a newly selected paragraph. Symbol-only lines do not consume the lookahead. Audio is saved under ignored `Work/Speech/` and reused across restarts, with a shared 1 GB rolling limit. The first uncached paragraph, a distant jump, or a new voice can still require a wait.
 
+Audio keys use paragraph text, voice, and backend rather than a whole-book fingerprint: revising one paragraph does not discard unrelated audio. An optional private `Speechrepairs.json` in the book workspace lists `{ "index": 42, "voice": "en-US-AriaNeural" }` entries to regenerate at startup. These jobs share the existing background pools, while playback requests keep foreground priority. The frontend reconnects and requests a new job when a cached job expires instead of stopping at a stale key.
+
 ### Optional local Furina TTS
 
 Select the local voice to use an already installed local service. ParallelText does not install its model dependencies. The service must accept `POST /api/speech` with `{"text":"English text", "language":"en", "transient":true}` and return PCM WAV without leaving a duplicate file in its own output directory. An optional `X-Synthesis-Seconds` header records model time. Long paragraphs are split into at most 450-character requests and concatenated into one WAV. This backend does not provide word timestamps; the original online voices remain available.

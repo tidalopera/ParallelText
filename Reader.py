@@ -245,12 +245,13 @@ class CachedSpeechStore(SpeechStore):
         self.client = FurinaClient(self.settings.get("furinaUrl", "http://127.0.0.1:9880"), self.monitor, self.stopped)
         self.preparation = {"state": "idle", "done": 0}
         self.preparing = None
+        self.repairs = {"state":"idle", "done":0, "total":0}
         self.anchor = 0
         self.prepare_lock = threading.Lock()
 
     def key(self, index, voice):
         backend = self.client.url if voice == "furina-local-en" else "edge-tts-7.3.1"
-        return hashlib.sha256(("v1:"+self.identity+voice+backend+self.book[index]["english"]).encode()).hexdigest()[:24]
+        return hashlib.sha256(("v2:"+voice+backend+self.book[index]["english"]).encode()).hexdigest()[:24]
 
     def request(self, index, voice, background=False):
         key = self.key(index, voice)
@@ -260,6 +261,9 @@ class CachedSpeechStore(SpeechStore):
             if key not in self.entries:
                 cached = self.cache.get(key)
                 if cached:
+                    if cached.get("book") != self.identity or cached.get("index") != index:
+                        cached = {**cached,"book":self.identity,"index":index}
+                        self.cache.put(key,cached,key)
                     future = Future()
                     future.set_result({**cached, "index":index, "voice":voice})
                     self.entries[key] = future
@@ -295,6 +299,34 @@ class CachedSpeechStore(SpeechStore):
             self.start_preparation(index+1, voice)
             return {"state":"scheduled", "indices":[], "preparation":self.preparation}
         return super().prefetch(index, voice, count)
+
+    def start_repairs(self, items):
+        self.repairs = {"state":"regenerating", "done":0, "total":len(items), "errors":[]}
+        def one(item):
+            if self.stopped.is_set(): return
+            index, voice = item["index"], item["voice"]
+            self.repairs["current"] = index
+            try:
+                while not self.stopped.is_set():
+                    try:
+                        result = self.request(index,voice,background=True)
+                        break
+                    except BusyError:
+                        self.stopped.wait(.3)
+                else: return
+                while result["state"] == "pending" and not self.stopped.wait(.25):
+                    result = self.status(result["key"])
+                if self.stopped.is_set(): return
+                if result["state"] != "ready": raise RuntimeError(result.get("message","Audio failed"))
+                with self.prepare_lock:
+                    self.repairs["done"] += 1
+            except Exception as error:
+                self.repairs["errors"].append({"index":index,"message":str(error)})
+        def run():
+            with ThreadPoolExecutor(max_workers=2,thread_name_prefix="RepairQueue") as pool:
+                list(pool.map(one,items))
+            self.repairs["state"] = "complete" if not self.repairs["errors"] else "error"
+        threading.Thread(target=run,daemon=True,name="RepairAudio").start()
 
     def start_preparation(self, start, voice):
         with self.prepare_lock:
@@ -393,7 +425,8 @@ def make_handler(book, store):
                     return self._send(compressed_book if compressed else book_json, "application/json; charset=utf-8",
                                       extra={"Vary": "Accept-Encoding", **({"Content-Encoding": "gzip"} if compressed else {})})
                 if parsed.path == "/api/cache" and isinstance(store, CachedSpeechStore):
-                    return self._json({**store.cache.stats(), "preparation":store.preparation, "resources":store.monitor.state})
+                    return self._json({**store.cache.stats(), "preparation":store.preparation, "resources":store.monitor.state,
+                                       "repairs":store.repairs,"playbackIndex":store.anchor})
                 if parsed.path == "/api/speech":
                     return self._json(store.status(parse_qs(parsed.query).get("key", [""])[0]))
                 match = re.fullmatch(r"/audio/([a-f0-9]{24})\.(mp3|wav)", parsed.path)
@@ -495,6 +528,9 @@ def main():
         print(f"Already running: http://127.0.0.1:{PORT}")
         return
     store = CachedSpeechStore(book, BASE / "Work" / "Speech", SETTINGS)
+    repairs_file = BOOK / "Speechrepairs.json"
+    if repairs_file.exists():
+        store.start_repairs(json.loads(repairs_file.read_text("utf-8-sig")))
     if SETTINGS.get("prepareChapter"):
         start = next((i for i,p in enumerate(book) if re.match(rf"^Chapter {SETTINGS['prepareChapter']}\b",p["english"])), None)
         if start is not None:

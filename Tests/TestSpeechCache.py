@@ -42,7 +42,8 @@ class CacheTests(unittest.TestCase):
                     store.entries[key].result(timeout=3)
                     self.assertEqual(store.status(key)["state"],"ready")
             finally: store.close()
-            second=r.CachedSpeechStore(book,Path(directory))
+            changed_book=book+[{'index':1,'english':'An unrelated revision.','chinese':'Another','chapter':'Test'}]
+            second=r.CachedSpeechStore(changed_book,Path(directory))
             try:
                 with patch.object(second.client,"generate",side_effect=AssertionError("Should reuse disk")):
                     result=second.request(0,"furina-local-en")
@@ -66,6 +67,24 @@ class CacheTests(unittest.TestCase):
             finally:
                 store.close()
                 store.preparing.join(timeout=2)
+
+    def test_repair_queue_rebuilds_audio_and_serves_it_ready(self):
+        book=[{'index':i,'english':text,'chinese':'Source','chapter':'Test'} for i,text in enumerate(['First words.','Second words.'])]
+        with TemporaryDirectory() as directory:
+            store=r.CachedSpeechStore(book,Path(directory))
+            def generate(text,path,background):
+                with wave.open(str(path),'wb') as audio:
+                    audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(32000);audio.writeframes(b'\0\1'*100)
+            try:
+                with patch.object(store.client,'generate',side_effect=generate):
+                    store.start_repairs([{'index':i,'voice':'furina-local-en'} for i in range(2)])
+                    deadline=time.monotonic()+3
+                    while store.repairs['state']=='regenerating' and time.monotonic()<deadline:time.sleep(.02)
+                    self.assertEqual(store.repairs['state'],'complete')
+                    self.assertEqual(store.repairs['done'],2)
+                    self.assertEqual(store.repairs['errors'],[])
+                    for i in range(2):self.assertEqual(store.request(i,'furina-local-en')['state'],'ready')
+            finally:store.close()
 
 
 if __name__=="__main__": unittest.main()
