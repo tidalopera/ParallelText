@@ -61,6 +61,15 @@
   }
 
   function status(text) { $("status").textContent = text; }
+  async function pollCache() {
+    try {
+      const data = await jsonRequest("/api/cache");
+      const job = data.preparation || {};
+      const labels = { "preparing":"预生成中", "paused-resources":"资源忙，已暂停", "cache-full":"缓存已满", "complete":"已到全文末尾", "error":"预生成出错", "idle":"待机" };
+      $("cacheStatus").textContent = `音频缓存 ${(data.bytes / 1e6).toFixed(1)} / ${(data.limitBytes / 1e6).toFixed(0)} MB · ${labels[job.state] || job.state}${Number.isInteger(job.next) ? ` · 第 ${job.next + 1} 段` : ""}${job.message ? ` · ${job.message}` : ""}`;
+    } catch (_) {}
+    if (!stopped) setTimeout(pollCache, 5000);
+  }
   function updateControls() {
     $("play").textContent = loading ? "◌" : desiredPlay ? "Ⅱ" : "▶";
     $("play").classList.toggle("loading", loading);
@@ -205,7 +214,7 @@
       body: JSON.stringify({ index: i, voice, count: 6 }) }).catch(() => {});
   }
   async function speechReady(i, voice, signal) {
-    const deadline = Date.now() + 85000;
+    const deadline = Date.now() + (voice === "furina-local-en" ? 1200000 : 85000);
     let result;
     while (!result) {
       try { result = await requestParagraph(i, voice, signal); }
@@ -385,10 +394,13 @@
     try {
       const data = await jsonRequest("/api/book");
       book = data.paragraphs; indexed = book.map(p => normalize(p.english));
+      if (Number.isInteger(data.startIndex)) index = data.startIndex;
       index = Math.min(index, book.length - 1);
       $("bookTitle").textContent = data.title;
       $("bookCount").textContent = `${book.length.toLocaleString()} 段中英对照`;
       for (const voice of data.voices) { const option = document.createElement("option"); option.value = voice.id; option.textContent = voice.name; $("voice").append(option); }
+      if (data.defaultVoice) $("voice").value = data.defaultVoice;
+      if (data.diskCache) pollCache();
       renderReading(); status("点击播放，或搜索想开始的位置");
     } catch (error) { status(`载入失败：${error.message}。请确认本地服务已启动后刷新。`); $("connection").textContent = "连接失败"; }
   }

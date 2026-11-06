@@ -29,7 +29,27 @@ The reader checks that `Aligned.json` and `English.txt` match before loading. St
 
 If `Work/Book/Aligned.json` exists, the default reader and Windows launcher load that private workspace on port 8765; otherwise they load the included demo on port 8766. The CLI can override the port with `--port`.
 
-While preparing the current paragraph, the player starts generating the next six speakable paragraphs. Two background workers handle prefetching; separate foreground workers and promotion of queued jobs keep speculative work from blocking a newly selected paragraph. Symbol-only lines do not consume the lookahead. Audio remains cached for the service lifetime: the first uncached paragraph, a distant jump, or a new voice can still require a network wait.
+For online voices, the player generates the next six speakable paragraphs while preparing the current paragraph. Separate foreground workers and promotion of queued jobs keep speculative work from blocking a newly selected paragraph. Symbol-only lines do not consume the lookahead. Audio is saved under ignored `Work/Speech/` and reused across restarts, with a shared 1 GB rolling limit. The first uncached paragraph, a distant jump, or a new voice can still require a wait.
+
+### Optional local Furina TTS
+
+Select the local voice to use an already installed local service. ParallelText does not install its model dependencies. The service must accept `POST /api/speech` with `{"text":"English text", "language":"en", "transient":true}` and return PCM WAV without leaving a duplicate file in its own output directory. An optional `X-Synthesis-Seconds` header records model time. Long paragraphs are split into at most 450-character requests and concatenated into one WAV. This backend does not provide word timestamps; the original online voices remain available.
+
+Merge these optional keys into your ignored local `Config.json`:
+
+```json
+{
+  "furinaUrl": "http://127.0.0.1:9880",
+  "defaultVoice": "furina-local-en",
+  "startChapter": 1,
+  "prepareChapter": 1,
+  "speechCacheBytes": 1000000000
+}
+```
+
+Local background preparation continues toward the end until the disk budget is nearly full, preserving unread audio and rolling out consumed entries as playback advances. Set `furinaPidFile` to the model service's PID file to exclude that process's own GPU counters from other-workload checks. Cached audio survives restarts; the preparation job skips valid files when resuming.
+
+Local synthesis pauses before another chunk when CPU usage is at least 65%, available memory is below 4 GiB, or measured GPU usage by other processes is at least 50%. An in-flight chunk finishes first. GPU counters on Windows are best-effort; unavailable measurements are reported as `null`. The sidebar shows progress and pauses; `GET /api/cache` gives details. Closing the reader stops preparation. Local neural speech can be slower than real time; pre-generation does not accelerate the model itself.
 
 ## Translate a text
 
@@ -100,7 +120,7 @@ Caches fingerprint the model, endpoint, reasoning setting, prompt, schema and pa
 | `Work/` | Private source snapshots, prompts/responses, translations and review records; ignored by Git |
 | `Config.json` | Your local settings; ignored by Git |
 
-The reader binds to `127.0.0.1` and validates Host/Origin. It is designed for local personal use, not public hosting. Audio is cached in a temporary directory for the service lifetime. Translation sends source content to your chosen model endpoint; TTS sends selected English text to its online service. This is not a fully offline application.
+The reader binds to `127.0.0.1` and validates Host/Origin. It is designed for local personal use, not public hosting. Audio persists in ignored `Work/Speech/`. Translation sends content to your chosen endpoint. Online voices send selected English text to the online speech service; the optional local voice sends it to the configured local model service.
 
 If you already have a trusted local authentication module exporting `access_token()`, set `PARALLELTEXT_AUTH_MODULE` to its file path. That file is imported as Python code: only select a module you trust. No authentication module, account tokens or user credentials are bundled.
 
