@@ -364,7 +364,13 @@
   $("next").addEventListener("click", () => navigate(index + 1, { autoplay: desiredPlay || !audio.src }));
   $("rewind").addEventListener("click", () => skip(-10));
   $("forward").addEventListener("click", () => skip(10));
-  $("speed").addEventListener("change", () => { audio.playbackRate = Number($("speed").value); updateHighlight(); });
+  $("speed").addEventListener("input", () => {
+    const speed = Number($("speed").value);
+    audio.playbackRate = speed;
+    $("speedValue").textContent = `${speed.toFixed(2)}×`;
+    $("speed").setAttribute("aria-valuetext", `${speed.toFixed(2)}倍`);
+    updateHighlight();
+  });
   $("voice").addEventListener("change", () => { if (audio.src || loading) navigate(index, { autoplay: desiredPlay }); });
   $("follow").addEventListener("change", followCurrent);
   $("timeline").addEventListener("input", () => { if (Number.isFinite(audio.duration)) { audio.currentTime = Number($("timeline").value); updateTimeline(); } });

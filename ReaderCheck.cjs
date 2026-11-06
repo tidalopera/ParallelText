@@ -81,12 +81,30 @@ async function run() {
   assert.equal(audio.src, "/audio/3.mp3", "start at consecutive punctuation then continue");
   assert.equal(audio.paused, false);
   assert.deepEqual(requests, [3], "foreground requests only the current paragraph");
+  audio.currentTime = 2;
+  const playCount = audio.playCount;
+  for (const speed of ["0.5", "0.93", "1.37", "2"]) {
+    get("speed").value = speed; get("speed").emit("input");
+    assert.equal(audio.playbackRate, Number(speed), "slider applies immediately while dragging");
+    assert.equal(get("speedValue").textContent, `${Number(speed).toFixed(2)}×`);
+  }
+  assert.equal(audio.currentTime, 2, "speed changes preserve playback position");
+  assert.equal(audio.paused, false, "speed changes preserve active playback");
+  assert.equal(audio.playCount, playCount, "speed changes do not restart playback");
+  assert.deepEqual(requests, [3], "speed changes reuse existing audio");
+  get("speed").value = "1.37"; get("speed").emit("input");
   expireOnce = true;
   audio.paused = true; audio.emit("ended");
   await new Promise(resolve=>setTimeout(resolve,1100)); await flush();
   assert.equal(audio.src, "/audio/5.mp3", "autoplay crosses punctuation");
+  assert.equal(audio.playbackRate, 1.37, "autoplay preserves the selected fractional speed");
+  audio.pause();
+  get("speed").value = "0.93"; get("speed").emit("input");
+  assert.equal(audio.playbackRate, 0.93);
+  assert.equal(audio.paused, true, "speed changes preserve paused playback");
   get("previous").emit("click"); await flush();
   assert.equal(audio.src, "/audio/3.mp3", "previous travels backward across punctuation");
+  assert.equal(audio.playbackRate, 0.93, "manual navigation preserves the selected speed");
   audio.currentTime = 2;
   get("rewind").emit("click"); await flush();
   assert.equal(audio.src, "/audio/0.mp3", "rewind crosses consecutive punctuation");
@@ -106,6 +124,6 @@ async function run() {
   get("play").emit("click"); await flush();
   assert.equal(requests.length, count);
   assert.equal(audio.src, "");
-  console.log("Reader checks passed: symbol-only start/autoplay/previous/seek/end, prefetch, real errors, all-symbol book");
+  console.log("Reader checks passed: continuous speed, symbol-only start/autoplay/previous/seek/end, prefetch, real errors, all-symbol book");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
