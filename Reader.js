@@ -68,7 +68,9 @@
       const labels = { "preparing":"预生成中", "paused-resources":"资源忙，已暂停", "cache-full":"缓存已满", "complete":"已到全文末尾", "error":"预生成出错", "idle":"待机" };
       $("cacheStatus").textContent = `音频缓存 ${(data.bytes / 1e6).toFixed(1)} / ${(data.limitBytes / 1e6).toFixed(0)} MB · ${labels[job.state] || job.state}${Number.isInteger(job.next) ? ` · 第 ${job.next + 1} 段` : ""}${job.message ? ` · ${job.message}` : ""}`;
       if (data.repairs?.state === "regenerating") $("cacheStatus").textContent += ` · 修订音频重建 ${data.repairs.done}/${data.repairs.total}`;
-      if (loading && $("voice").value === "furina-local-en" && data.resources?.busy) status("资源紧张，等待恢复后生成本段；已缓存段落可直接播放");
+      if (data.model?.released) $("cacheStatus").textContent += ` · 模型已释放，空闲 ${(data.model.availableBytes/1e9).toFixed(1)}GB，重载需约 ${(data.model.reloadRequiredBytes/1e9).toFixed(1)}GB`;
+      if (data.model?.loading) $("cacheStatus").textContent += " · 正在重新加载模型";
+      if (loading && $("voice").value === "furina-local-en" && (data.resources?.busy || data.model?.released || data.model?.loading)) status("低内存时释放模型，恢复后自动重载；已缓存段落可直接播放");
     } catch (_) {}
     if (!stopped) setTimeout(pollCache, 5000);
   }

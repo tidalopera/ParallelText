@@ -23,7 +23,9 @@ uv run python Reader.py
 
 可选的 Furina 本机声音复用已有模型服务，不安装模型依赖。它不提供逐词时间戳，原在线语音路径保留。配置 `furinaUrl`、`defaultVoice: "furina-local-en"`、`startChapter` 和 `prepareChapter` 后，后台从指定章持续准备，直到缓存接近 1GB 或全文末尾。
 
-本机合成会在 CPU 占用达到 65%、可用内存不足 4GiB、或其他进程 GPU 占用达到 50% 时暂停。正在合成的一小段完成后再停。Windows GPU 计数器属于尽力检测，缺失时状态显示 null。侧边栏显示缓存进度和暂停状态，`/api/cache` 提供详细信息。资源恢复后自动继续，关闭服务则停止。详细接口协议见英文说明；本机模型也可能慢于实时，预生成只是提前完成计算。
+可用内存达到0.5GB就继续生成，CPU/GPU使用率仅供显示。配置本地可信的 `furinaStartScript`、`furinaStopScript` 和 `furinaPidFile` 后，低于0.5GB时会退出模型服务、释放其进程内存；磁盘音频保留。恢复后重新加载并重试未完成的小段。没有启停脚本配置时，只能等待内存恢复，不能卸载外部服务。
+
+重载时会预留此前观测到的模型分配量和0.5GB余量，并设置30秒冷却，避免卸载腾出内存后立刻重新装满。状态保存在 `Work/Speech/ModelState.json`，侧边栏和 `/api/cache` 可以查看。关闭阅读器会停止后台监管和预生成。Windows GPU计数器缺失时显示null。本机模型仍可能慢于实时，预生成只是提前完成计算。
 
 ## 翻译自己的文本
 

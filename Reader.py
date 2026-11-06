@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import urlopen
 import edge_tts
 from SpeechCache import DiskCache, ResourceMonitor, FurinaClient
+from MemoryGuard import MemoryGuard
 
 BASE = Path(__file__).resolve().parent
 BOOK = BASE / "Work" / "Book" if (BASE / "Work" / "Book" / "Aligned.json").exists() else BASE / "Examples" / "Book"
@@ -243,6 +244,9 @@ class CachedSpeechStore(SpeechStore):
         self.cache = DiskCache(directory, int(self.settings.get("speechCacheBytes", 1_000_000_000)))
         self.monitor = ResourceMonitor(self.settings.get("furinaPidFile"))
         self.client = FurinaClient(self.settings.get("furinaUrl", "http://127.0.0.1:9880"), self.monitor, self.stopped)
+        self.guard = MemoryGuard(self.settings,self.stopped,self.directory/"ModelState.json")
+        self.client.guard = self.guard
+        self.guard.start()
         self.preparation = {"state": "idle", "done": 0}
         self.preparing = None
         self.repairs = {"state":"idle", "done":0, "total":0}
@@ -349,7 +353,7 @@ class CachedSpeechStore(SpeechStore):
                             if self.cache.stats()["bytes"]+estimate > self.cache.limit:
                                 state["state"] = "cache-full"
                                 return
-                            while self.monitor.sample()["busy"]:
+                            while self.monitor.sample()["busy"] or self.guard.waiting():
                                 state["state"] = "paused-resources"
                                 if self.stopped.wait(2): return
                             state["state"] = "preparing"
@@ -426,7 +430,7 @@ def make_handler(book, store):
                                       extra={"Vary": "Accept-Encoding", **({"Content-Encoding": "gzip"} if compressed else {})})
                 if parsed.path == "/api/cache" and isinstance(store, CachedSpeechStore):
                     return self._json({**store.cache.stats(), "preparation":store.preparation, "resources":store.monitor.state,
-                                       "repairs":store.repairs,"playbackIndex":store.anchor})
+                                       "repairs":store.repairs,"playbackIndex":store.anchor,"model":store.guard.status})
                 if parsed.path == "/api/speech":
                     return self._json(store.status(parse_qs(parsed.query).get("key", [""])[0]))
                 match = re.fullmatch(r"/audio/([a-f0-9]{24})\.(mp3|wav)", parsed.path)

@@ -12,6 +12,8 @@ import threading
 import time
 from urllib.request import Request, urlopen
 import wave
+from http.client import IncompleteRead
+from MemoryGuard import LOW_MEMORY_BYTES
 
 
 class DiskCache:
@@ -132,10 +134,7 @@ class ResourceMonitor:
         elif hasattr(os, "getloadavg"):
             cpu = min(100, os.getloadavg()[0]/max(1,os.cpu_count())*100)
         reasons = []
-        if os.name == "nt" and warming: reasons.append("measuring CPU load")
-        if cpu >= 65: reasons.append("CPU busy")
-        if free is not None and free < 4: reasons.append("less than 4 GiB memory available")
-        if gpu is not None and gpu >= 50: reasons.append("other GPU workloads busy")
+        if free is not None and free*1024**3 < LOW_MEMORY_BYTES: reasons.append("less than 0.5 GB memory available; releasing model")
         self.state = {"busy": bool(reasons), "reason": "; ".join(reasons), "cpuPercent": round(cpu,1),
                       "availableGiB": round(free,2) if free is not None else None, "otherGpuPercent": gpu}
         self.updated = time.monotonic()
@@ -149,10 +148,11 @@ class FurinaClient:
         self.condition = threading.Condition()
         self.busy = False
         self.foreground_waiters = 0
+        self.guard = None
 
     @contextmanager
     def admission(self, background):
-        while self.monitor.sample()["busy"]:
+        while self.monitor.sample()["busy"] or (self.guard and self.guard.waiting()):
             if self.stopped.wait(2): raise RuntimeError("Speech stopped")
         with self.condition:
             if not background: self.foreground_waiters += 1
@@ -187,18 +187,24 @@ class FurinaClient:
         started = time.monotonic()
         synthesis_seconds = 0.0
         for chunk in self.split(text):
-            with self.admission(background):
-                request = Request(self.url+"/api/speech", data=json.dumps({"text":chunk,"language":"en","transient":True}).encode(),
-                                  headers={"Content-Type":"application/json"})
-                with urlopen(request, timeout=600) as response:
-                    data = response.read()
-                    synthesis_seconds += float(response.headers.get("X-Synthesis-Seconds", "0"))
-                    if "json" in response.headers.get("Content-Type", ""):
-                        raise RuntimeError("Furina service needs transient WAV support; restart the updated service")
-                with wave.open(io.BytesIO(data)) as audio:
-                    params = (audio.getnchannels(), audio.getsampwidth(), audio.getframerate())
-                    if audio.getnframes() == 0: raise ValueError("Empty Furina audio")
-                    parts.append((params, audio.readframes(audio.getnframes())))
+            while True:
+                try:
+                    with self.admission(background):
+                        request = Request(self.url+"/api/speech", data=json.dumps({"text":chunk,"language":"en","transient":True}).encode(),
+                                          headers={"Content-Type":"application/json"})
+                        with urlopen(request, timeout=600) as response:
+                            data = response.read()
+                            synthesis_seconds += float(response.headers.get("X-Synthesis-Seconds", "0"))
+                            if "json" in response.headers.get("Content-Type", ""):
+                                raise RuntimeError("Furina service needs transient WAV support; restart the updated service")
+                        with wave.open(io.BytesIO(data)) as audio:
+                            params = (audio.getnchannels(), audio.getsampwidth(), audio.getframerate())
+                            if audio.getnframes() == 0: raise ValueError("Empty Furina audio")
+                            parts.append((params, audio.readframes(audio.getnframes())))
+                    break
+                except (OSError, EOFError, IncompleteRead):
+                    if not self.guard or not self.guard.waiting() or self.stopped.is_set():raise
+                    if self.stopped.wait(1):raise RuntimeError("Speech stopped")
         if not parts: raise ValueError("No speech content")
         if any(params != parts[0][0] for params, _ in parts): raise ValueError("Inconsistent WAV formats")
         temp = path.with_suffix(".wav.tmp")
