@@ -1,0 +1,10 @@
+{
+  "translationModel": "YOUR_TRANSLATION_MODEL",
+  "analysisModel": "YOUR_REVIEW_MODEL",
+  "baseUrl": "https://api.openai.com/v1",
+  "reasoningEffort": null,
+  "batchChars": 6800,
+  "scanChars": 68000,
+  "glossaryRules": "Use Pinyin for personal names. Preserve titles and full-name/short-name distinctions.",
+  "translationRules": "Use clear, faithful English. Preserve ambiguity and avoid inventing context."
+}

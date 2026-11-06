@@ -1,0 +1,354 @@
+"""ParallelText loopback-only bilingual reader. TTS uses an online service."""
+from __future__ import annotations
+import asyncio
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
+import gzip
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import logging
+from pathlib import Path
+import re
+import sys
+import tempfile
+import threading
+import time
+import unicodedata
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import urlopen
+import edge_tts
+
+BASE = Path(__file__).resolve().parent
+BOOK = BASE / "Examples" / "Book"
+PORT = 8766
+APP = "ParallelText"
+VOICES = [
+    {"id": "en-US-AriaNeural", "name": "Aria · 美式女声"},
+    {"id": "en-US-JennyNeural", "name": "Jenny · 美式女声"},
+    {"id": "en-US-GuyNeural", "name": "Guy · 美式男声"},
+    {"id": "en-GB-SoniaNeural", "name": "Sonia · 英式女声"},
+]
+VOICE_IDS = {v["id"] for v in VOICES}
+QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "—": "-", "–": "-"})
+
+
+def normalize(text):
+    return " ".join(unicodedata.normalize("NFKC", text).translate(QUOTES).casefold().split())
+
+
+def has_speech(text):
+    return any(char.isalnum() for char in text)
+
+
+def book_id(book):
+    return hashlib.sha256(json.dumps(book, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def load_book():
+    aligned = json.loads((BOOK / "Aligned.json").read_text(encoding="utf-8-sig"))
+    english = [" ".join(p.split()) for p in re.split(
+        r"\n\s*\n", (BOOK / "English.txt").read_text(encoding="utf-8-sig")) if p.strip()]
+    if len(english) != len(aligned):
+        raise ValueError("English.txt 与 Aligned.json 的段落数量不一致。")
+    book = []
+    for i, row in enumerate(aligned):
+        if english[i] != " ".join(row["translation"].split()):
+            raise ValueError(f"第 {i + 1} 段英文与配对数据不一致，请核对原文件。")
+        book.append({"index": i, "english": english[i], "chinese": row["source"], "chapter": row["chapter"]})
+    if not book:
+        raise ValueError("没有可朗读的段落。")
+    return book
+
+
+def map_boundaries(text, events):
+    """Use real word times and exact source offsets (UTF-16 offsets for JS)."""
+    cursor, words = 0, []
+    for event in events:
+        token = event["text"]
+        start = text.find(token, cursor)
+        if start < 0:
+            for position in range(cursor, len(text)):
+                if text[position:position + len(token)].translate(QUOTES).casefold() == token.translate(QUOTES).casefold():
+                    start = position
+                    break
+        if start < 0:
+            continue
+        end = start + len(token)
+        words.append({"start": event["offset"] / 10_000_000,
+                      "end": (event["offset"] + event["duration"]) / 10_000_000,
+                      "from": len(text[:start].encode("utf-16-le")) // 2,
+                      "to": len(text[:end].encode("utf-16-le")) // 2})
+        cursor = end
+    return words
+
+
+class BusyError(Exception):
+    pass
+
+
+class SpeechStore:
+    def __init__(self, book, directory):
+        self.book, self.directory = book, directory
+        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Speech")
+        self.lock = threading.Lock()
+        self.entries = {}
+        self.stopped = threading.Event()
+
+    def key(self, index, voice):
+        return hashlib.sha256(f"{index}:{voice}".encode()).hexdigest()[:24]
+
+    def request(self, index, voice):
+        if not has_speech(self.book[index]["english"]):
+            return {"state": "skipped", "index": index, "voice": voice, "reason": "no-spoken-content"}
+        key = self.key(index, voice)
+        with self.lock:
+            if key in self.entries and self.entries[key].done() and self.entries[key].exception():
+                del self.entries[key]
+            if key not in self.entries:
+                if sum(not f.done() for f in self.entries.values()) >= 4:
+                    raise BusyError("正在准备其他语音，请稍候。")
+                self._prune()
+                self.entries[key] = self.pool.submit(self._generate, index, voice, key)
+            return self._status(key)
+
+    def _prune(self):
+        total = sum(p.stat().st_size for p in self.directory.glob("*.mp3"))
+        for key in list(self.entries):
+            if len(self.entries) < 96 and total < 64 * 1024 * 1024:
+                break
+            if self.entries[key].done():
+                path = self.directory / f"{key}.mp3"
+                if path.exists():
+                    total -= path.stat().st_size
+                    path.unlink(missing_ok=True)
+                del self.entries[key]
+
+    def _status(self, key):
+        future = self.entries.get(key)
+        if future is None:
+            raise KeyError("语音缓存已过期，请重新播放本段。")
+        if not future.done():
+            return {"state": "pending", "key": key}
+        try:
+            return {"state": "ready", "key": key, **future.result()}
+        except Exception as error:
+            return {"state": "error", "key": key, "message": str(error) or type(error).__name__}
+
+    def status(self, key):
+        with self.lock:
+            return self._status(key)
+
+    def audio(self, key):
+        with self.lock:
+            if self._status(key)["state"] != "ready":
+                raise KeyError("音频尚未就绪。")
+            return (self.directory / f"{key}.mp3").read_bytes()
+
+    async def _stream(self, text, voice, path):
+        for attempt in range(2):
+            boundaries = []
+            try:
+                with path.open("wb") as audio:
+                    speech = edge_tts.Communicate(text, voice, boundary="WordBoundary", connect_timeout=10, receive_timeout=25)
+                    async for chunk in speech.stream():
+                        if chunk["type"] == "audio":
+                            audio.write(chunk["data"])
+                        elif chunk["type"] == "WordBoundary":
+                            boundaries.append(chunk)
+                if not path.stat().st_size:
+                    raise RuntimeError("语音服务返回了空音频。")
+                return map_boundaries(text, boundaries)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt:
+                    raise
+                await asyncio.sleep(1)
+
+    async def _generate_async(self, index, voice, key):
+        task = asyncio.create_task(self._stream(self.book[index]["english"], voice, self.directory / f"{key}.mp3"))
+        try:
+            deadline = time.monotonic() + 70
+            while not task.done():
+                if self.stopped.is_set() or time.monotonic() > deadline:
+                    raise RuntimeError("语音生成已停止或超时，请重试。")
+                await asyncio.wait([task], timeout=0.1)
+            return {"audio": f"/audio/{key}.mp3", "words": await task, "index": index, "voice": voice}
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    def _generate(self, index, voice, key):
+        try:
+            return asyncio.run(self._generate_async(index, voice, key))
+        except Exception:
+            logging.exception("Speech generation failed for paragraph %s", index + 1)
+            (self.directory / f"{key}.mp3").unlink(missing_ok=True)
+            raise
+
+    def close(self):
+        self.stopped.set()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+
+
+def make_handler(book, store):
+    book_json = json.dumps({"title": book[0]["english"], "paragraphs": book, "voices": VOICES}, ensure_ascii=False).encode("utf-8")
+    compressed_book = gzip.compress(book_json)
+    files = {"/": ("Reader.html", "text/html; charset=utf-8"),
+             "/Reader.css": ("Reader.css", "text/css; charset=utf-8"),
+             "/Reader.js": ("Reader.js", "text/javascript; charset=utf-8")}
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = APP
+
+        def log_message(self, *_):
+            pass
+
+        def _valid_host(self):
+            return self.headers.get("Host") in {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+
+        def _send(self, data, content_type, status=200, extra=None):
+            self.send_response(status)
+            for key, value in {"Content-Type": content_type, "Content-Length": len(data), "Cache-Control": "no-store",
+                               "X-Content-Type-Options": "nosniff",
+                               "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+                               **(extra or {})}.items():
+                self.send_header(key, str(value))
+            self.end_headers()
+            if self.command != "HEAD":
+                with suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    self.wfile.write(data)
+
+        def _json(self, payload, status=200):
+            self._send(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
+
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_GET(self):
+            if not self._valid_host():
+                return self._json({"message": "Invalid host"}, 403)
+            parsed = urlsplit(self.path)
+            try:
+                if parsed.path == "/api/health":
+                    return self._json({"app": APP, "paragraphs": len(book), "bookId": book_id(book)})
+                if parsed.path in files:
+                    name, content_type = files[parsed.path]
+                    return self._send((BASE / name).read_bytes(), content_type)
+                if parsed.path == "/api/book":
+                    compressed = "gzip" in self.headers.get("Accept-Encoding", "")
+                    return self._send(compressed_book if compressed else book_json, "application/json; charset=utf-8",
+                                      extra={"Vary": "Accept-Encoding", **({"Content-Encoding": "gzip"} if compressed else {})})
+                if parsed.path == "/api/speech":
+                    return self._json(store.status(parse_qs(parsed.query).get("key", [""])[0]))
+                match = re.fullmatch(r"/audio/([a-f0-9]{24})\.mp3", parsed.path)
+                if match:
+                    return self._audio(store.audio(match[1]))
+                return self._json({"message": "Not found"}, 404)
+            except KeyError as error:
+                self._json({"message": str(error)}, 404)
+            except Exception as error:
+                logging.exception("GET failed")
+                self._json({"message": str(error)}, 500)
+
+        def _audio(self, data):
+            headers = {"Accept-Ranges": "bytes"}
+            byte_range = self.headers.get("Range")
+            if byte_range:
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", byte_range)
+                if not match or not any(match.groups()):
+                    return self._send(b"", "audio/mpeg", 416, {"Content-Range": f"bytes */{len(data)}"})
+                first, last = match.groups()
+                start = int(first) if first else max(0, len(data) - int(last))
+                end = min(int(last), len(data) - 1) if first and last else len(data) - 1
+                if start >= len(data) or end < start:
+                    return self._send(b"", "audio/mpeg", 416, {"Content-Range": f"bytes */{len(data)}"})
+                headers["Content-Range"] = f"bytes {start}-{end}/{len(data)}"
+                return self._send(data[start:end + 1], "audio/mpeg", 206, headers)
+            return self._send(data, "audio/mpeg", extra=headers)
+
+        def do_POST(self):
+            origin = self.headers.get("Origin")
+            if not self._valid_host() or (origin and origin not in {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}):
+                return self._json({"message": "Invalid origin"}, 403)
+            if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                return self._json({"message": "Expected JSON"}, 415)
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if not 0 < size <= 2048:
+                    raise ValueError("Invalid request size")
+                payload = json.loads(self.rfile.read(size))
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid JSON body")
+                if self.path == "/api/shutdown":
+                    self._json({"state": "stopped"})
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
+                if self.path != "/api/speech":
+                    return self._json({"message": "Not found"}, 404)
+                index, voice = payload.get("index"), payload.get("voice")
+                if type(index) is not int or not 0 <= index < len(book) or not isinstance(voice, str) or voice not in VOICE_IDS:
+                    raise ValueError("Invalid paragraph or voice")
+                self._json(store.request(index, voice))
+            except BusyError as error:
+                self._json({"message": str(error)}, 429)
+            except (ValueError, TypeError) as error:
+                self._json({"message": str(error)}, 400)
+            except Exception as error:
+                logging.exception("POST failed")
+                self._json({"message": str(error)}, 500)
+
+    return Handler
+
+
+def main():
+    global BOOK, PORT
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--book", type=Path, default=BOOK, help="Directory containing Aligned.json and English.txt")
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--check", action="store_true", help="Check files without starting a server")
+    args = parser.parse_args()
+    BOOK = args.book.expanduser().resolve()
+    PORT = args.port
+    if not 1 <= PORT <= 65535:
+        parser.error("port must be between 1 and 65535")
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+    if args.check:
+        book = load_book()
+        for name in ("Reader.html", "Reader.css", "Reader.js"):
+            if not (BASE / name).read_text(encoding="utf-8").strip():
+                raise RuntimeError(f"Empty asset: {name}")
+        print(f"Startup check passed: {len(book)} aligned bilingual paragraphs; HTML/CSS/JS present")
+        return
+    book = load_book()
+    running = None
+    try:
+        with urlopen(f"http://127.0.0.1:{PORT}/api/health", timeout=1) as response:
+            running = json.load(response)
+    except Exception:
+        pass
+    if running and running.get("app") == APP:
+        if running.get("bookId") != book_id(book):
+            raise SystemExit("This port serves a different book; stop it or choose another --port")
+        print(f"Already running: http://127.0.0.1:{PORT}")
+        return
+    with tempfile.TemporaryDirectory(prefix="ParallelText") as directory:
+        store = SpeechStore(book, Path(directory))
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(book, store))
+            server.daemon_threads = True
+            print(f"Reader ready: http://127.0.0.1:{PORT}", flush=True)
+            try:
+                server.serve_forever(poll_interval=0.1)
+            finally:
+                server.server_close()
+        finally:
+            store.close()
+
+
+if __name__ == "__main__":
+    main()

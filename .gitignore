@@ -1,0 +1,22 @@
+# Private input, translations, prompts, review artifacts, and audio belong in Work/.
+/Work/
+/Config.json
+.env
+.env.*
+!.env.example
+*Credentials*
+*credentials*
+*token*.json
+*.bin
+*.pem
+*.key
+*.mp3
+*.wav
+*.log
+*.tmp
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Thumbs.db

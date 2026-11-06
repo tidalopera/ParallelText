@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f3ed">
+  <title>ParallelText · 双语听读</title>
+  <link rel="stylesheet" href="/Reader.css">
+  <script src="/Reader.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="返回阅读器"><span class="brandmark">P</span><span>PARALLELTEXT<span class="brand-sub">双语听读室</span></span></a>
+    <div class="sidebar-heading">找到想听的地方</div>
+    <form id="searchForm" class="search-form">
+      <label class="sr-only" for="query">英文关键词或原句</label>
+      <input id="query" type="search" placeholder="英文关键词或一句原文" autocomplete="off" required>
+      <button type="submit" aria-label="搜索">↵</button>
+    </form>
+    <p id="searchSummary" class="small muted" aria-live="polite">输入关键词，跳到故事里的任意一刻。</p>
+    <div id="results" class="search-results" aria-label="搜索结果"></div>
+    <div class="sidebar-bottom">
+      <div class="connection"><span class="dot"></span><span id="connection">本地阅读 · 在线语音</span></div>
+      <button id="shutdown" class="text-button">关闭本地服务</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar"><span class="eyebrow">THE READING ROOM</span><label class="follow-control"><input id="follow" type="checkbox" checked> 跟随朗读</label></header>
+    <section class="book-heading">
+      <div class="eyebrow accent">LISTEN, READ & WANDER</div>
+      <h1 id="bookTitle">ParallelText</h1>
+      <div class="book-meta"><span>中英对照 · 在线朗读</span><span class="separator">/</span><span id="bookCount">正在载入…</span></div>
+    </section>
+    <div class="reading-toolbar"><span id="chapter">正在载入故事…</span><span id="contextLabel">前后各 5 段 · 点击任意段落开始</span></div>
+    <section id="reading" class="reading" aria-label="中英对照正文"></section>
+    <div class="reading-footnote">英文逐词跟读 · 中文对照阅读</div>
+  </main>
+
+  <footer id="player" class="player" aria-label="朗读播放器（鼠标移到底部显示）">
+    <div class="player-main">
+      <div class="now-reading"><div class="eyebrow">NOW READING</div><strong id="position">准备就绪</strong><span id="status" role="status" aria-live="polite">正在载入文本…</span></div>
+      <div class="transport">
+        <button id="previous" class="icon-button" title="上一段（Alt + ←）" aria-label="上一段">⏮</button>
+        <button id="rewind" class="seek-button" title="后退 10 秒（J）" aria-label="后退10秒">↶<span>10</span></button>
+        <button id="play" class="play-button" title="播放或暂停（空格）" aria-label="播放" disabled>▶</button>
+        <button id="forward" class="seek-button" title="前进 10 秒（L）" aria-label="前进10秒">↷<span>10</span></button>
+        <button id="next" class="icon-button" title="下一段（Alt + →）" aria-label="下一段">⏭</button>
+      </div>
+      <div class="settings">
+        <label><span class="sr-only">声音</span><select id="voice" aria-label="声音"></select></label>
+        <label><span class="sr-only">语速</span><select id="speed" aria-label="语速"><option value="0.5">0.5×</option><option value="0.65">0.65×</option><option value="0.75">0.75×</option><option value="0.85">0.85×</option><option value="1" selected>1.0×</option><option value="1.15">1.15×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2.0×</option></select></label>
+      </div>
+    </div>
+    <div class="timeline"><time id="elapsed">0:00</time><input id="timeline" type="range" min="0" max="1" step="0.01" value="0" aria-label="当前段落音频进度" disabled><time id="duration">0:00</time></div>
+    <p class="player-hint">空格 播放 / 暂停 <span>·</span> J / L 前后 10 秒 <span>·</span> Alt + ← / → 切换段落</p>
+  </footer>
+  <audio id="audio" preload="auto"></audio>
+</body>
+</html>

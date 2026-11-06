@@ -1,0 +1,14 @@
+[project]
+name = "paralleltext"
+version = "0.1.0"
+description = "Glossary-guided Chinese-to-English translation and local bilingual listening"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+dependencies = [
+    "openai>=2,<3",
+    "edge-tts==7.3.1",
+]
+
+[tool.uv]
+package = false
