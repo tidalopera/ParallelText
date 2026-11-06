@@ -200,6 +200,10 @@
   function requestParagraph(i, voice, signal) {
     return jsonRequest("/api/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ index: i, voice }), signal });
   }
+  function warmAhead(i, voice) {
+    return jsonRequest("/api/prefetch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: i, voice, count: 6 }) }).catch(() => {});
+  }
   async function speechReady(i, voice, signal) {
     const deadline = Date.now() + 85000;
     let result;
@@ -270,7 +274,9 @@
         nextIndex = spokenIndex;
         index = nextIndex; words = []; renderReading();
         status("正在准备本段语音…"); followCurrent();
-        const result = await speechReady(index, voice, signal);
+        const preparing = speechReady(index, voice, signal);
+        warmAhead(index, voice);
+        const result = await preparing;
         if (ownRevision !== revision) return;
         if (result.state === "skipped") { nextIndex = index + step; continue; }
         words = result.words; renderReading();
@@ -288,8 +294,6 @@
       loading = false; updateControls(); updateTimeline(); followCurrent();
       status(words.length ? "音频已就绪 · 点击英文单词也可跳转" : "音频已就绪 · 本段未返回逐词时间戳");
       if (desiredPlay) await playAudio();
-      const prefetch = nextSpeakable(book, index + 1);
-      if (prefetch >= 0) requestParagraph(prefetch, voice).catch(() => {});
     } catch (error) {
       if (ownRevision !== revision || error.name === "AbortError") return;
       loading = false; desiredPlay = false; updateControls(); updateTimeline();

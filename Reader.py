@@ -21,8 +21,8 @@ from urllib.request import urlopen
 import edge_tts
 
 BASE = Path(__file__).resolve().parent
-BOOK = BASE / "Examples" / "Book"
-PORT = 8766
+BOOK = BASE / "Work" / "Book" if (BASE / "Work" / "Book" / "Aligned.json").exists() else BASE / "Examples" / "Book"
+PORT = 8765 if (BASE / "Work" / "Book" / "Aligned.json").exists() else 8766
 APP = "ParallelText"
 VOICES = [
     {"id": "en-US-AriaNeural", "name": "Aria · 美式女声"},
@@ -92,38 +92,74 @@ class SpeechStore:
     def __init__(self, book, directory):
         self.book, self.directory = book, directory
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Speech")
+        self.prefetch_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Prefetch")
         self.lock = threading.Lock()
         self.entries = {}
+        self.background = set()
+        self.current_key = None
         self.stopped = threading.Event()
 
     def key(self, index, voice):
         return hashlib.sha256(f"{index}:{voice}".encode()).hexdigest()[:24]
 
-    def request(self, index, voice):
+    def request(self, index, voice, background=False):
         if not has_speech(self.book[index]["english"]):
             return {"state": "skipped", "index": index, "voice": voice, "reason": "no-spoken-content"}
         key = self.key(index, voice)
         with self.lock:
+            if not background:
+                self.current_key = key
+            # A queued speculative job must not keep the current paragraph waiting.
+            if not background and key in self.entries and self.entries[key].cancel():
+                del self.entries[key]
+                self.background.discard(key)
             if key in self.entries and self.entries[key].done() and self.entries[key].exception():
                 del self.entries[key]
+                self.background.discard(key)
             if key not in self.entries:
-                if sum(not f.done() for f in self.entries.values()) >= 4:
+                if background and sum(not f.done() for f in self.entries.values()) >= 8:
                     raise BusyError("正在准备其他语音，请稍候。")
                 self._prune()
-                self.entries[key] = self.pool.submit(self._generate, index, voice, key)
+                pool = self.prefetch_pool if background else self.pool
+                self.entries[key] = pool.submit(self._generate, index, voice, key)
+                if background:
+                    self.background.add(key)
             return self._status(key)
+
+    def prefetch(self, index, voice, count=6):
+        wanted = []
+        for i in range(index+1, len(self.book)):
+            if has_speech(self.book[i]["english"]):
+                wanted.append(i)
+                if len(wanted) == count:
+                    break
+        keep = {self.key(i, voice) for i in [index, *wanted]}
+        with self.lock:
+            for key in list(self.entries):
+                if key in self.background and key not in keep and not self.entries[key].done() and self.entries[key].cancel():
+                    del self.entries[key]
+                    self.background.discard(key)
+        scheduled = []
+        for i in wanted:
+            try:
+                self.request(i, voice, background=True)
+                scheduled.append(i)
+            except BusyError:
+                break
+        return {"state": "scheduled", "indices": scheduled}
 
     def _prune(self):
         total = sum(p.stat().st_size for p in self.directory.glob("*.mp3"))
         for key in list(self.entries):
             if len(self.entries) < 96 and total < 64 * 1024 * 1024:
                 break
-            if self.entries[key].done():
+            if key != self.current_key and self.entries[key].done():
                 path = self.directory / f"{key}.mp3"
                 if path.exists():
                     total -= path.stat().st_size
                     path.unlink(missing_ok=True)
                 del self.entries[key]
+                self.background.discard(key)
 
     def _status(self, key):
         future = self.entries.get(key)
@@ -192,6 +228,7 @@ class SpeechStore:
 
     def close(self):
         self.stopped.set()
+        self.prefetch_pool.shutdown(wait=True, cancel_futures=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
 
 
@@ -288,11 +325,16 @@ def make_handler(book, store):
                     self._json({"state": "stopped"})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
-                if self.path != "/api/speech":
+                if self.path not in {"/api/speech", "/api/prefetch"}:
                     return self._json({"message": "Not found"}, 404)
                 index, voice = payload.get("index"), payload.get("voice")
                 if type(index) is not int or not 0 <= index < len(book) or not isinstance(voice, str) or voice not in VOICE_IDS:
                     raise ValueError("Invalid paragraph or voice")
+                if self.path == "/api/prefetch":
+                    count = payload.get("count", 6)
+                    if type(count) is not int or not 1 <= count <= 8:
+                        raise ValueError("Prefetch count must be between 1 and 8")
+                    return self._json(store.prefetch(index, voice, count))
                 self._json(store.request(index, voice))
             except BusyError as error:
                 self._json({"message": str(error)}, 429)

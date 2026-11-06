@@ -27,6 +27,10 @@ uv run python Reader.py --book Work/Book --port 8766
 
 The reader checks that `Aligned.json` and `English.txt` match before loading. Stop the current service with its “关闭本地服务” button before using a different book on the same port, or choose another port.
 
+If `Work/Book/Aligned.json` exists, the default reader and Windows launcher load that private workspace on port 8765; otherwise they load the included demo on port 8766. The CLI can override the port with `--port`.
+
+While preparing the current paragraph, the player starts generating the next six speakable paragraphs. Two background workers handle prefetching; separate foreground workers and promotion of queued jobs keep speculative work from blocking a newly selected paragraph. Symbol-only lines do not consume the lookahead. Audio remains cached for the service lifetime: the first uncached paragraph, a distant jump, or a new voice can still require a network wait.
+
 ## Translate a text
 
 The translator uses the OpenAI Responses API. A custom `OPENAI_BASE_URL` must implement streaming Responses and strict JSON-schema output; a Chat Completions-only endpoint will not work. Model names are configurable, and access and charges depend on your provider.
@@ -99,6 +103,8 @@ Caches fingerprint the model, endpoint, reasoning setting, prompt, schema and pa
 The reader binds to `127.0.0.1` and validates Host/Origin. It is designed for local personal use, not public hosting. Audio is cached in a temporary directory for the service lifetime. Translation sends source content to your chosen model endpoint; TTS sends selected English text to its online service. This is not a fully offline application.
 
 If you already have a trusted local authentication module exporting `access_token()`, set `PARALLELTEXT_AUTH_MODULE` to its file path. That file is imported as Python code: only select a module you trust. No authentication module, account tokens or user credentials are bundled.
+
+Alternatively set `authModule` in your ignored local `Config.json`. It is resolved by the same interpreter as the project; no separate environment is launched.
 
 Keep private input inside `Work/`; arbitrary files elsewhere are not automatically private. Check `git status` before publishing your own copy. The software license does not grant rights to third-party books or their translations.
 

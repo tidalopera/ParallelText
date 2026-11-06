@@ -59,6 +59,12 @@ async function run() {
     requestAnimationFrame: () => 1,
     fetch: async (url, options = {}) => {
       if (url === "/api/book") return { ok: true, json: async () => ({ title: "Test", paragraphs, voices: [] }) };
+      if (url === "/api/prefetch") {
+        const { index, count } = JSON.parse(options.body);
+        assert.equal(count, 6);
+        assert.equal(hasSpeech(paragraphs[index].english), true);
+        return { ok: true, json: async () => ({ state: "scheduled" }) };
+      }
       assert.equal(url, "/api/speech");
       const { index } = JSON.parse(options.body); requests.push(index);
       assert.equal(hasSpeech(paragraphs[index].english), true, "must never request punctuation-only speech");
@@ -71,7 +77,7 @@ async function run() {
   get("play").emit("click"); await flush();
   assert.equal(audio.src, "/audio/3.mp3", "start at consecutive punctuation then continue");
   assert.equal(audio.paused, false);
-  assert.deepEqual(requests, [3, 5], "prefetch must also skip punctuation");
+  assert.deepEqual(requests, [3], "foreground requests only the current paragraph");
   audio.paused = true; audio.emit("ended"); await flush();
   assert.equal(audio.src, "/audio/5.mp3", "autoplay crosses punctuation");
   get("previous").emit("click"); await flush();

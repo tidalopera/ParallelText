@@ -55,7 +55,7 @@ def configure(args):
 
 def access_token():
     """Credentials remain in environment or an explicitly selected local provider."""
-    provider = os.getenv("PARALLELTEXT_AUTH_MODULE")
+    provider = os.getenv("PARALLELTEXT_AUTH_MODULE") or SETTINGS.get("authModule")
     if provider:
         spec = importlib.util.spec_from_file_location("paralleltext_auth", Path(provider).expanduser().resolve())
         if spec is None or spec.loader is None:

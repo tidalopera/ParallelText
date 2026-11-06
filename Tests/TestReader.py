@@ -10,6 +10,43 @@ import Reader as r
 
 
 class ReaderTests(unittest.TestCase):
+    def test_prefetch_looks_ahead_over_symbols(self):
+        book = [{"english": text} for text in ["Now", "...", "One", "Two", "!", "Three", "Four", "Five", "Six", "Seven"]]
+        with TemporaryDirectory() as directory:
+            store = r.SpeechStore(book, Path(directory))
+            try:
+                with patch.object(store, "request", return_value={"state": "pending"}) as request:
+                    self.assertEqual(store.prefetch(0, "voice")["indices"], [2, 3, 5, 6, 7, 8])
+                    self.assertTrue(all(call.kwargs["background"] for call in request.call_args_list))
+            finally:
+                store.close()
+
+    def test_current_paragraph_promoted_out_of_prefetch_queue(self):
+        started = [threading.Event(), threading.Event()]
+        release = threading.Event()
+        def generate(index, voice, key):
+            if index in (0, 1):
+                started[index].set()
+                release.wait(5)
+            return {"index": index, "audio": "/audio/test.mp3", "words": []}
+        with TemporaryDirectory() as directory:
+            store = r.SpeechStore([{"english": "Words"} for _ in range(5)], Path(directory))
+            try:
+                with patch.object(store, "_generate", side_effect=generate):
+                    store.request(0, "voice", background=True)
+                    store.request(1, "voice", background=True)
+                    self.assertTrue(all(event.wait(2) for event in started))
+                    store.request(2, "voice", background=True)
+                    queued = store.entries[store.key(2, "voice")]
+                    store.request(2, "voice")
+                    self.assertTrue(queued.cancelled())
+                    self.assertEqual(store.entries[store.key(2, "voice")].result(timeout=2)["index"], 2)
+                    # Both speculative workers are still blocked; foreground was independent.
+                    self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                store.close()
+
     def test_alignment_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             book = Path(directory)
