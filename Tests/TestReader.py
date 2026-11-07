@@ -43,6 +43,10 @@ class ReaderTests(unittest.TestCase):
                     payload = json.dumps({"index":0,"voice":voice,"count":count,"plan":plan}).encode()
                     return urlopen(Request(f"http://127.0.0.1:{port}/api/prefetch",data=payload,headers={"Content-Type":"application/json"}),timeout=3)
                 try:
+                    with urlopen(f"http://127.0.0.1:{port}/api/book",timeout=3) as response:
+                        metadata=json.load(response)
+                    self.assertRegex(metadata["stateId"],r"^[a-f0-9]{24}$")
+                    self.assertNotIn(str(r.BOOK),metadata["stateId"])
                     plan = [{"index":2,"voice":voice},{"index":3,"voice":"en-CA-ClaraNeural"}]
                     with send(plan) as response:self.assertEqual(response.status,200)
                     prefetch.assert_called_once_with(0,voice,plan)

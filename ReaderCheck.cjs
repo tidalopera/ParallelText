@@ -69,7 +69,7 @@ class Audio extends Element {
 }
 const flush = async () => { for (let i = 0; i < 6; ++i) await new Promise(setImmediate); };
 
-async function run() {
+async function createReader(storage = new Map(), settings = {}) {
   const elements = new Map();
   const get = id => {
     if (!elements.has(id)) elements.set(id, id === "audio" ? new Audio() : new Element());
@@ -83,6 +83,9 @@ async function run() {
   Object.assign(doc, { getElementById: get, createElement: () => new Element(), createDocumentFragment: () => new Element(), createTextNode: text => ({ textContent: text }) });
   const win = new Element();
   Object.assign(win, { innerHeight: 900, scrollY: 0, getSelection: () => null });
+  win.localStorage = settings.blockStorage ? {
+    getItem() { throw new Error("Storage disabled"); }, setItem() { throw new Error("Storage disabled"); },
+  } : { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value) };
   let failure = false;
   let expireOnce = false;
   const requests = [];
@@ -91,12 +94,12 @@ async function run() {
     document: doc, window: win, console, AbortController, DOMException, setTimeout, clearTimeout, queueMicrotask,
     requestAnimationFrame: () => 1,
     fetch: async (url, options = {}) => {
-      if (url === "/api/book") return { ok: true, json: async () => ({ title: "Test", paragraphs, defaultVoice:"en-US-AriaNeural", voices: [
+      if (url === "/api/book") return { ok: true, json: async () => ({ title: "Test", stateId: settings.stateId || "testbook", paragraphs, defaultVoice:"en-US-AriaNeural", voices: [
         {id:"furina-local-en",name:"Furina"},
         {id:"en-US-AriaNeural",name:"Aria",locale:"en-US",gender:"Female"},
         {id:"en-CA-ClaraNeural",name:"Clara",locale:"en-CA",gender:"Female"},
         {id:"de-DE-SeraphinaMultilingualNeural",name:"SeraphinaMultilingual",locale:"de-DE",gender:"Female"},
-      ] }) };
+      ].filter(v => v.id !== settings.removeVoice) }) };
       if (url.startsWith("/api/speech?key=")) return { ok: false, status: 404, json: async () => ({ message:"expired" }) };
       if (url === "/api/prefetch") {
         const { index, count } = JSON.parse(options.body);
@@ -119,6 +122,99 @@ async function run() {
   };
   vm.runInNewContext(fs.readFileSync(require.resolve("./Reader.js"), "utf8"), context);
   await flush();
+  return { get, win, doc, requests, requestedVoices, plans,
+    set failure(value) { failure = value; }, set expireOnce(value) { expireOnce = value; } };
+}
+
+async function checkPersistence() {
+  const storage = new Map();
+  const first = await createReader(storage);
+  const { get } = first;
+  get("voiceLanguage").value = "cloud"; get("voiceLanguage").emit("change");
+  get("voiceRotation").checked = true; get("voiceEvery").value = "2"; get("voiceRotation").emit("change");
+  get("paragraphRepeat").checked = true; get("repeatEvery").value = "3"; get("paragraphRepeat").emit("change");
+  get("furinaFirst").checked = true; get("furinaFirst").emit("change");
+  get("speed").value = "1.37"; get("speed").emit("input");
+  get("follow").checked = false; get("follow").emit("change");
+  get("play").emit("click"); await flush();
+  const audio = get("audio");
+  // Finish one paragraph and Furina's pass on the next: preserve both counters.
+  for (let i = 0; i < 4; ++i) { audio.paused = true; audio.emit("ended"); await flush(); }
+  audio.currentTime = 2.35; audio.emit("seeked"); first.win.emit("pagehide");
+  const saved = JSON.parse(storage.get("ParallelText:reader:1:testbook"));
+  assert.equal(saved.index, 5);
+  assert.equal(saved.repeatPass, 1);
+  assert.equal(saved.rotationCompleted, 1);
+  assert.equal(saved.time, 2.35);
+  const second = await createReader(storage);
+  const read = second.get, restoredAudio = read("audio");
+  assert.equal(read("speed").value, "1.37");
+  assert.equal(read("follow").checked, false);
+  assert.equal(read("voiceLanguage").value, "cloud");
+  assert.equal(read("voiceRotation").checked, true);
+  assert.equal(read("voiceEvery").value, "2");
+  assert.equal(read("paragraphRepeat").checked, true);
+  assert.equal(read("repeatEvery").value, "3");
+  assert.equal(read("furinaFirst").checked, true);
+  assert.match(read("repeatStatus").textContent, /第 2\/3/);
+  assert.match(read("rotationStatus").textContent, /本轮 1\/2/);
+  assert.equal(restoredAudio.paused, true);
+  assert.equal(restoredAudio.src, "", "restoring must not synthesize or autoplay");
+  assert.deepEqual(second.requests, []);
+  // Repeated refreshes before Play must preserve the saved audio offset.
+  read("follow").checked = true; read("follow").emit("change"); second.win.emit("pagehide");
+  const third = await createReader(storage);
+  third.get("play").emit("click"); await flush();
+  assert.equal(third.requests[0], 5);
+  assert.equal(third.requestedVoices[0], saved.voice);
+  assert.equal(third.get("audio").currentTime, 2.35);
+  assert.equal(third.get("audio").playbackRate, 1.37);
+  third.get("audio").paused = true; third.get("audio").emit("ended"); await flush();
+  assert.match(third.get("repeatStatus").textContent, /第 3\/3/, "continue the restored repetition");
+  const different = await createReader(storage, { stateId: "otherbook" });
+  assert.equal(different.get("speed").value, "1", "book workspaces keep independent settings");
+  assert.equal(different.get("furinaFirst").checked, false);
+  const removed = await createReader(storage, { removeVoice: saved.voice });
+  assert.match(removed.get("repeatStatus").textContent, /第 1\//, "removed voices reset the pass safely");
+  const invalid = new Map([["ParallelText:reader:1:testbook", "{broken"]]);
+  const corrupt = await createReader(invalid);
+  assert.equal(corrupt.get("play").disabled, false);
+  storage.set("ParallelText:reader:1:testbook", JSON.stringify({
+    version:1, index:999999, time:-1, speed:99, voiceLanguage:"unknown", repeatPass:999,
+    paragraphBaseVoice:"deleted", voice:"deleted", voiceEvery:-5, repeatEvery:0,
+  }));
+  const outOfRange = await createReader(storage);
+  assert.equal(outOfRange.get("speed").value, "1");
+  assert.equal(outOfRange.get("voiceLanguage").value, "all");
+  assert.equal(outOfRange.get("play").disabled, false, "invalid persisted values fall back safely");
+  const blocked = await createReader(new Map(), { blockStorage: true });
+  blocked.get("play").emit("click"); await flush();
+  assert.equal(blocked.get("audio").paused, false, "storage failure cannot break playback");
+  saved.time = 90; saved.voice = "en-US-AriaNeural";
+  storage.set("ParallelText:reader:1:testbook", JSON.stringify(saved));
+  const shorter = await createReader(storage);
+  shorter.get("play").emit("click"); await flush();
+  assert.deepEqual(shorter.requests, [5], "shorter regenerated audio must stay on saved paragraph");
+  assert.equal(shorter.get("audio").currentTime, 4.95);
+  const filtered = await createReader(new Map());
+  filtered.get("voiceLanguage").value = "en"; filtered.get("voiceLanguage").emit("change");
+  filtered.get("voiceSearch").value = "Clara"; filtered.get("voiceSearch").emit("input");
+  filtered.get("query").value = "Second"; filtered.get("query").emit("input");
+  // Seed another page from the actual stored snapshot, not hand-built settings.
+  const filterStorage = new Map();
+  filtered.win.localStorage.setItem = (key, value) => filterStorage.set(key, value);
+  filtered.win.emit("pagehide");
+  const filterRestored = await createReader(filterStorage);
+  assert.equal(filterRestored.get("voiceSearch").value, "Clara");
+  assert.equal(filterRestored.get("voiceLanguage").value, "en");
+  assert.equal(filterRestored.get("query").value, "Second");
+  assert.equal(filterRestored.get("results").children.length, 1);
+}
+
+async function run() {
+  await checkPersistence();
+  const harness = await createReader();
+  const { get, requests, requestedVoices, plans } = harness;
   const audio = get("audio");
   assert.equal(get("voice").value, "en-US-AriaNeural", "catalogue preserves the configured default");
   assert.equal(get("voice").children.length, 4, "all voices are available initially");
@@ -157,7 +253,7 @@ async function run() {
   assert.deepEqual(requests,[3],"enabling rotation does not interrupt the current paragraph");
   assert.equal(plans.at(-1)[0].index,5,"rotation prefetch skips symbols");
   assert.equal(plans.at(-1)[0].voice,"en-CA-ClaraNeural","prefetch uses the next voice before the current paragraph ends");
-  expireOnce = true;
+  harness.expireOnce = true;
   audio.paused = true; audio.emit("ended");
   await new Promise(resolve=>setTimeout(resolve,1100)); await flush();
   assert.equal(audio.src, "/audio/5.mp3", "autoplay crosses punctuation");
@@ -207,7 +303,7 @@ async function run() {
     if (step===0) {
       audio.pause(); get("speed").emit("input");
       assert.match(get("repeatStatus").textContent,/第 1\/3/,"pause and speed do not advance repetitions");
-      expireOnce=true;
+      harness.expireOnce=true;
     }
     audio.paused=true; audio.emit("ended");
     if (step===0) await new Promise(resolve=>setTimeout(resolve,1100));
@@ -252,7 +348,7 @@ async function run() {
   get("furinaFirst").checked=false; get("furinaFirst").emit("change");
   get("paragraphRepeat").checked=false; get("paragraphRepeat").emit("change");
   get("voiceRotation").checked=false; get("voiceRotation").emit("change");
-  failure = true;
+  harness.failure = true;
   get("previous").emit("click"); await flush();
   assert.match(get("status").textContent, /network test/, "real service errors must not be skipped");
   assert.equal(audio.src, "");
@@ -262,6 +358,6 @@ async function run() {
   get("play").emit("click"); await flush();
   assert.equal(requests.length, count);
   assert.equal(audio.src, "");
-  console.log("Reader checks passed: Furina-first mode and paused activation, combined repetitions and rotation, planned prefetch, filters, speed, symbols, seek, retry, errors");
+  console.log("Reader checks passed: persistence across reloads, offsets, repetition/rotation phase, per-book isolation, invalid/blocked storage, removed voices, Furina-first, prefetch, filters, speed, symbols, seek, retry, errors");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

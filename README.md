@@ -27,6 +27,8 @@ uv run python Reader.py --book Work/Book --port 8766
 
 The reader checks that `Aligned.json` and `English.txt` match before loading. Stop the current service with its “关闭本地服务” button before using a different book on the same port, or choose another port.
 
+The browser saves the paragraph, audio offset, current repetition and rotation progress, voice, speed, filters and player settings in local storage per book workspace. Refreshing or reopening restores them paused; click Play to continue. Storage is specific to the browser and site address, and clearing site data removes it. Invalid state or unavailable voices fall back safely. After updating code, restart the reader backend and refresh the page; the launcher reuses an already running service and does not update it in place.
+
 If `Work/Book/Aligned.json` exists, the default reader and Windows launcher load that private workspace on port 8765; otherwise they load the included demo on port 8766. The CLI can override the port with `--port`.
 
 For online voices, the player generates the next 20 speakable paragraphs while preparing the current paragraph. Separate foreground workers and promotion of queued jobs keep speculative work from blocking a newly selected paragraph. Symbol-only lines do not consume the lookahead. Audio is saved under ignored `Work/Speech/` and reused across restarts, with a shared 1 GB rolling limit. The first uncached paragraph, a distant jump, or a new voice can still require a wait.

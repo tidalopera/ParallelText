@@ -89,6 +89,61 @@
   let voices = [];
   let rotationCompleted = 0;
   let paragraphBaseVoice = "", repeatPass = 0;
+  let stateKey = null, stateReady = false, resumeTime = 0, lastSavedAt = 0;
+
+  function saveState(force = true) {
+    if (!stateReady || stopped || (!force && Date.now() - lastSavedAt < 1000)) return;
+    try {
+      const time = !loading && audio.src && loadedVoice === $("voice").value ? audio.currentTime : resumeTime;
+      window.localStorage.setItem(stateKey, JSON.stringify({
+        version: 1, index, time: Number.isFinite(time) ? Math.max(0, time) : 0,
+        voice: $("voice").value, paragraphBaseVoice, repeatPass, rotationCompleted,
+        speed: Number($("speed").value), voiceSearch: $("voiceSearch").value,
+        voiceLanguage: $("voiceLanguage").value, voiceRotation: $("voiceRotation").checked,
+        voiceEvery: Number($("voiceEvery").value), paragraphRepeat: $("paragraphRepeat").checked,
+        repeatEvery: Number($("repeatEvery").value), furinaFirst: $("furinaFirst").checked,
+        follow: $("follow").checked, query: $("query").value,
+      }));
+      lastSavedAt = Date.now();
+    } catch (_) { /* Storage may be disabled or full; reading must remain usable. */ }
+  }
+
+  function restoreState(data) {
+    stateKey = `ParallelText:reader:1:${data.stateId || data.title}`;
+    let saved;
+    try { saved = JSON.parse(window.localStorage.getItem(stateKey)); } catch (_) {}
+    if (!saved || saved.version !== 1) return false;
+    const integer = (value, fallback, max) => Number.isInteger(value) && value >= 0 && value <= max ? value : fallback;
+    for (const id of ["voiceRotation", "paragraphRepeat", "furinaFirst", "follow"]) {
+      if (typeof saved[id] === "boolean") $(id).checked = saved[id];
+    }
+    for (const id of ["voiceSearch", "query"]) {
+      if (typeof saved[id] === "string") $(id).value = saved[id].slice(0, 1000);
+    }
+    if (["all", "cloud", ...voices.map(voiceGroup)].includes(saved.voiceLanguage)) $("voiceLanguage").value = saved.voiceLanguage;
+    $("voiceEvery").value = String(Math.max(1, integer(saved.voiceEvery, 3, 1000)));
+    $("repeatEvery").value = String(Math.max(1, integer(saved.repeatEvery, 3, voices.length)));
+    if (Number.isFinite(saved.speed) && saved.speed >= 0.5 && saved.speed <= 2) $("speed").value = String(saved.speed);
+    audio.playbackRate = Number($("speed").value);
+    $("speedValue").textContent = `${audio.playbackRate.toFixed(2)}×`;
+    $("speed").setAttribute("aria-valuetext", `${audio.playbackRate.toFixed(2)}倍`);
+    if (pinnedVoice()) $("paragraphRepeat").checked = true;
+    const validVoice = id => voices.some(v => v.id === id);
+    const baseValid = validVoice(saved.paragraphBaseVoice);
+    resetRotation(baseValid ? saved.paragraphBaseVoice : $("voice").value);
+    const sequence = currentSequence();
+    const pass = integer(saved.repeatPass, 0, sequence.length - 1);
+    // A removed voice or changed sequence must not resume a different voice halfway through.
+    const sameSequence = baseValid && validVoice(saved.voice) && saved.voice === sequence[pass];
+    repeatPass = sameSequence ? pass : 0;
+    rotationCompleted = sameSequence ? integer(saved.rotationCompleted, 0, Math.max(0, rotationEvery() - 1)) : 0;
+    filterVoices(currentSequence()[repeatPass]);
+    const validIndex = Number.isInteger(saved.index) && saved.index >= 0 && saved.index < book.length;
+    if (validIndex) index = saved.index;
+    resumeTime = validIndex && sameSequence && Number.isFinite(saved.time) && saved.time >= 0 ? saved.time : 0;
+    updateRotation();
+    return validIndex;
+  }
 
   const languageNames = new Intl.DisplayNames(["zh-CN"], { type: "language" });
   function voiceLocale(voice) { return voice.locale || (voice.id === "furina-local-en" ? "local" : voice.id.split("-").slice(0, 2).join("-")); }
@@ -131,6 +186,7 @@
     updateRepeats();
   }
   function resetRotation(first = $("voice").value) {
+    resumeTime = 0;
     if (pinnedVoice() && first === pinnedVoice()) first = rotationOrder()[0] || first;
     rotationCompleted = 0; repeatPass = 0; paragraphBaseVoice = first;
     const maximum = voiceSequence(first, rotationOrder(), Math.max(1, voices.length), pinnedVoice()).length;
@@ -273,6 +329,7 @@
     $("chapter").textContent = book[index].chapter;
     for (const result of $("results").children) result.classList.toggle("selected", Number(result.dataset.index) === index);
     updateControls();
+    saveState();
   }
 
   function followCurrent() {
@@ -397,9 +454,10 @@
     }
   }
 
-  async function navigate(target, { autoplay = true, offset = 0, fromEnd = false, automatic = false } = {}) {
+  async function navigate(target, { autoplay = true, offset = 0, fromEnd = false, automatic = false, restoring = false } = {}) {
     if (!book.length || stopped) return;
     if (!automatic) { resetRotation(paragraphBaseVoice || $("voice").value); filterVoices(currentSequence()[0]); }
+    resumeTime = Math.max(0, offset);
     const ownRevision = ++revision;
     if (controller) controller.abort();
     controller = new AbortController();
@@ -435,13 +493,19 @@
         audio.playbackRate = Number($("speed").value);
         audio.preservesPitch = true;
         const position = fromEnd ? audio.duration + offset : offset;
+        if (restoring) {
+          // Regenerated audio can be shorter: stay on the saved paragraph/pass.
+          audio.currentTime = Math.max(0, Math.min(Math.max(0, audio.duration - 0.05), position));
+          loadedVoice = voice; resumeTime = 0; break;
+        }
         // Carry the remainder across paragraph boundaries for true +/-10-second seeking.
         if (position < 0 && index > 0) { offset = position; fromEnd = true; step = -1; nextIndex = index - 1; continue; }
         if (position >= audio.duration && index < book.length - 1) { offset = position - audio.duration; fromEnd = false; step = 1; nextIndex = index + 1; continue; }
         audio.currentTime = Math.max(0, Math.min(audio.duration, position));
-        loadedVoice = voice; break;
+        loadedVoice = voice; resumeTime = 0; break;
       }
       loading = false; updateControls(); updateTimeline(); followCurrent();
+      saveState();
       status(words.length ? "音频已就绪 · 点击英文单词也可跳转" : "音频已就绪 · 本段未返回逐词时间戳");
       if (desiredPlay) await playAudio();
     } catch (error) {
@@ -454,7 +518,7 @@
   function togglePlay() {
     if (!book.length || stopped) return;
     if (loading) { desiredPlay = !desiredPlay; updateControls(); status(desiredPlay ? "准备完成后开始播放…" : "准备完成后保持暂停"); return; }
-    if (!audio.src || loadedVoice !== $("voice").value) { navigate(index, { autoplay: true, automatic: true }); return; }
+    if (!audio.src || loadedVoice !== $("voice").value) { navigate(index, { autoplay: true, automatic: true, offset: resumeTime, restoring: true }); return; }
     if (!audio.paused) { desiredPlay = false; audio.pause(); }
     else { desiredPlay = true; playAudio(); }
   }
@@ -529,6 +593,9 @@
   $("follow").addEventListener("change", followCurrent);
   $("timeline").addEventListener("input", () => { if (Number.isFinite(audio.duration)) { audio.currentTime = Number($("timeline").value); updateTimeline(); } });
   audio.addEventListener("timeupdate", updateTimeline);
+  audio.addEventListener("timeupdate", () => saveState(false));
+  audio.addEventListener("seeked", () => saveState());
+  audio.addEventListener("pause", () => saveState());
   audio.addEventListener("seeked", updateTimeline);
   audio.addEventListener("play", () => { desiredPlay = true; updateControls(); status("正在朗读 · 英文逐词高亮"); startAnimation(); });
   audio.addEventListener("pause", () => { if (!loading) { desiredPlay = false; updateControls(); status("已暂停"); } updateHighlight(); });
@@ -569,6 +636,7 @@
   });
   $("shutdown").addEventListener("click", async () => {
     try {
+      saveState();
       await jsonRequest("/api/shutdown", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       stopped = true; ++revision; if (controller) controller.abort();
       audio.pause(); audio.removeAttribute("src"); audio.load(); loading = false; desiredPlay = false;
@@ -576,6 +644,13 @@
       updateControls(); updateTimeline(); status("服务已关闭。下次运行 StartReader.vbs 后刷新此页即可。");
     } catch (error) { status(`关闭失败：${error.message}`); }
   });
+
+  for (const id of ["speed", "voiceSearch", "query"]) $(id).addEventListener("input", () => saveState());
+  for (const id of ["voice", "voiceLanguage", "voiceRotation", "voiceEvery", "paragraphRepeat", "repeatEvery", "furinaFirst", "follow"]) {
+    $(id).addEventListener("change", () => { if (id !== "follow" && !audio.src && !loading) resumeTime = 0; saveState(); });
+  }
+  window.addEventListener("pagehide", () => saveState());
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveState(); });
 
   async function initialize() {
     try {
@@ -586,8 +661,13 @@
       $("bookTitle").textContent = data.title;
       $("bookCount").textContent = `${book.length.toLocaleString()} 段中英对照`;
       initializeVoices(data);
+      const restored = restoreState(data);
+      stateReady = true;
       if (data.diskCache) pollCache();
-      renderReading(); status("点击播放，或搜索想开始的位置");
+      renderReading();
+      if ($("query").value) search();
+      followCurrent();
+      status(restored ? `已恢复阅读位置与设置 · 点击播放继续${resumeTime ? `（${formatTime(resumeTime)}）` : ""}` : "点击播放，或搜索想开始的位置");
     } catch (error) { status(`载入失败：${error.message}。请确认本地服务已启动后刷新。`); $("connection").textContent = "连接失败"; }
   }
   setupPlayerVisibility();

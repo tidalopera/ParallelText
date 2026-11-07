@@ -474,6 +474,7 @@ class CachedSpeechStore(SpeechStore):
 def make_handler(book, store):
     start_index = next((i for i,p in enumerate(book) if re.match(rf"^Chapter {SETTINGS.get('startChapter', -1)}\b", p["english"])), 2)
     book_json = json.dumps({"title": book[0]["english"], "paragraphs": book, "voices": VOICES,
+                           "stateId":hashlib.sha256(str(BOOK.resolve()).encode("utf-8")).hexdigest()[:24],
                            "defaultVoice":SETTINGS.get("defaultVoice", "en-US-AriaNeural"), "startIndex":start_index,
                            "diskCache":isinstance(store, CachedSpeechStore)}, ensure_ascii=False).encode("utf-8")
     compressed_book = gzip.compress(book_json)
