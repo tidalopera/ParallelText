@@ -45,17 +45,21 @@
 
   const languageNames = new Intl.DisplayNames(["zh-CN"], { type: "language" });
   function voiceLocale(voice) { return voice.locale || (voice.id === "furina-local-en" ? "local" : voice.id.split("-").slice(0, 2).join("-")); }
+  function voiceGroup(voice) {
+    const locale = voiceLocale(voice);
+    return locale === "local" ? "local" : locale.startsWith("en-") ? "en" : "multilingual";
+  }
   function voiceLabel(voice) {
     const locale = voiceLocale(voice);
     const language = locale === "local" ? "本机" : languageNames.of(locale);
     const gender = { Female:"女声", Male:"男声" }[voice.gender];
-    return [voice.name, language, gender].filter(Boolean).join(" · ");
+    return [voice.name, language, voiceGroup(voice) === "multilingual" ? "多语种 · 支持英文" : "", gender].filter(Boolean).join(" · ");
   }
   function filterVoices(preferred) {
     const current = typeof preferred === "string" ? preferred : $("voice").value;
     const language = $("voiceLanguage").value || "all";
     const query = normalize($("voiceSearch").value);
-    const matches = voices.filter(voice => (language === "all" || voiceLocale(voice).split("-")[0] === language)
+    const matches = voices.filter(voice => (language === "all" || voiceGroup(voice) === language)
       && normalize(`${voiceLabel(voice)} ${voice.id}`).includes(query));
     const fragment = document.createDocumentFragment();
     const addOption = (voice, prefix = "") => {
@@ -74,8 +78,9 @@
   function initializeVoices(data) {
     voices = data.voices;
     const fragment = document.createDocumentFragment();
-    const languages = [...new Set(voices.map(voice => voiceLocale(voice).split("-")[0]))].sort();
-    const options = [["all", "全部语言"], ...languages.map(language => [language, language === "local" ? "本机" : languageNames.of(language)])];
+    const languages = [...new Set(voices.map(voiceGroup))].sort();
+    const labels = { en:"英语地区", multilingual:"多语种", local:"本机" };
+    const options = [["all", "全部音色"], ...languages.map(language => [language, labels[language]])];
     for (const [value, label] of options) {
       const option = document.createElement("option"); option.value = value; option.textContent = label; fragment.append(option);
     }

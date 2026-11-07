@@ -8,6 +8,19 @@ import re
 import edge_tts
 
 BASE = Path(__file__).resolve().parent
+# These non-English-primary voices explicitly include English in Microsoft's
+# multilingual support table. Do not assume every future multilingual voice does.
+# https://docs.azure.cn/en-us/ai-services/speech-service/speech-synthesis-markup-voice
+ENGLISH_MULTILINGUAL = {
+    "de-DE-FlorianMultilingualNeural", "de-DE-SeraphinaMultilingualNeural",
+    "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
+    "it-IT-GiuseppeMultilingualNeural", "ko-KR-HyunsuMultilingualNeural",
+    "pt-BR-ThalitaMultilingualNeural",
+}
+
+
+def supports_english(voice):
+    return voice.get("locale", "").lower().startswith("en-") or voice.get("id") in ENGLISH_MULTILINGUAL
 
 
 def normalize_voices(rows):
@@ -35,7 +48,9 @@ def load_catalogue(cache=None, bundled=None):
                    or not re.fullmatch(r"[A-Za-z0-9-]{3,120}", v.get("id", ""))
                    or not isinstance(v.get("locale"), str) for v in rows):
                 continue
-            return rows
+            supported = [voice for voice in rows if supports_english(voice)]
+            if supported:
+                return supported
         except (OSError, ValueError, TypeError):
             continue
     return []
@@ -56,4 +71,4 @@ if __name__ == "__main__":
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
     voices = asyncio.run(refresh_catalogue(BASE/"Work/Voices.json")) if args.refresh else load_catalogue()
-    print(f"Edge voices: {len(voices)}")
+    print(f"Edge voices supporting English: {sum(supports_english(voice) for voice in voices)}")

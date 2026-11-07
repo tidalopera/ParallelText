@@ -63,7 +63,7 @@ async function run() {
         {id:"furina-local-en",name:"Furina"},
         {id:"en-US-AriaNeural",name:"Aria",locale:"en-US",gender:"Female"},
         {id:"en-CA-ClaraNeural",name:"Clara",locale:"en-CA",gender:"Female"},
-        {id:"zh-CN-XiaoxiaoNeural",name:"Xiaoxiao",locale:"zh-CN",gender:"Female"},
+        {id:"de-DE-SeraphinaMultilingualNeural",name:"SeraphinaMultilingual",locale:"de-DE",gender:"Female"},
       ] }) };
       if (url.startsWith("/api/speech?key=")) return { ok: false, status: 404, json: async () => ({ message:"expired" }) };
       if (url === "/api/prefetch") {
@@ -84,8 +84,9 @@ async function run() {
   const audio = get("audio");
   assert.equal(get("voice").value, "en-US-AriaNeural", "catalogue preserves the configured default");
   assert.equal(get("voice").children.length, 4, "all voices are available initially");
-  get("voiceLanguage").value = "zh"; get("voiceLanguage").emit("change");
+  get("voiceLanguage").value = "multilingual"; get("voiceLanguage").emit("change");
   assert.equal(get("voice").children.length, 2, "nonmatching current voice remains pinned");
+  assert.match(get("voice").children[1].textContent, /支持英文/);
   assert.equal(get("voice").value, "en-US-AriaNeural", "filtering never silently changes the voice");
   get("voiceSearch").value = "nonexistent"; get("voiceSearch").emit("input");
   assert.equal(get("voice").children.length, 1, "empty search retains the current voice");

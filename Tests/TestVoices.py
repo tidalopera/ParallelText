@@ -16,6 +16,8 @@ class VoiceTests(unittest.TestCase):
         ids = {voice["id"] for voice in catalogue}
         self.assertEqual(len(ids), len(catalogue))
         self.assertTrue(ids <= r.VOICE_IDS)
+        self.assertTrue(all(v.supports_english(voice) for voice in catalogue))
+        self.assertNotIn("zh-CN-XiaoxiaoNeural",r.VOICE_IDS)
         self.assertTrue({"furina-local-en", "en-US-AriaNeural", "en-US-JennyNeural",
                          "en-US-GuyNeural", "en-GB-SoniaNeural"} <= r.VOICE_IDS)
         with TemporaryDirectory() as directory:
@@ -24,6 +26,13 @@ class VoiceTests(unittest.TestCase):
                 self.assertNotEqual(store.key(0,"en-US-AriaNeural"), store.key(0,"en-CA-ClaraNeural"))
             finally:
                 store.close()
+
+    def test_language_support_is_not_just_primary_locale(self):
+        self.assertTrue(v.supports_english({"id":"en-CA-ClaraNeural","locale":"en-CA"}))
+        for voice in v.ENGLISH_MULTILINGUAL:
+            self.assertTrue(v.supports_english({"id":voice,"locale":voice[:5]}))
+        self.assertFalse(v.supports_english({"id":"zh-CN-XiaoxiaoNeural","locale":"zh-CN"}))
+        self.assertFalse(v.supports_english({"id":"xx-XX-UnknownMultilingualNeural","locale":"xx-XX"}))
 
     def test_corrupt_cache_falls_back_and_failed_refresh_preserves_cache(self):
         with TemporaryDirectory() as directory:
@@ -40,3 +49,5 @@ class VoiceTests(unittest.TestCase):
             with patch.object(v.edge_tts,"list_voices",new=AsyncMock(return_value=[])):
                 with self.assertRaises(ValueError): asyncio.run(v.refresh_catalogue(cache))
             self.assertEqual(cache.read_bytes(),before)
+            cache.write_text(json.dumps([{"id":"zh-CN-XiaoxiaoNeural","name":"Xiaoxiao","locale":"zh-CN"}]),encoding="utf-8")
+            self.assertEqual(v.load_catalogue(cache,bundled),rows)
