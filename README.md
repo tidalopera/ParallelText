@@ -41,6 +41,8 @@ The optional “每 N 段换下一个声音” control rotates after N spoken pa
 
 ### Optional local Furina TTS
 
+“芙宁娜固定首遍，其他声音轮换” pins `furina-local-en` to the first pass of every paragraph, even outside the current voice filter. Enabling it also enables paragraph repetition; its total pass count includes Furina. The remaining passes use distinct voices from the selected rotation group, excluding Furina. With 3 passes and a 2-paragraph rotation interval, paragraphs 1–2 use Furina/A/B and paragraphs 3–4 use Furina/B/C. A single total pass uses Furina only. Activating this mode or changing its cycle settings restarts the current paragraph at Furina, preserving play/pause state. The original local service and audio cache are reused.
+
 Select the local voice to use an already installed local service. ParallelText does not install its model dependencies. The service must accept `POST /api/speech` with `{"text":"English text", "language":"en", "transient":true}` and return PCM WAV without leaving a duplicate file in its own output directory. An optional `X-Synthesis-Seconds` header records model time. Long paragraphs are split into at most 450-character requests and concatenated into one WAV. This backend does not provide word timestamps; the original online voices remain available.
 
 Merge these optional keys into your ignored local `Config.json`:

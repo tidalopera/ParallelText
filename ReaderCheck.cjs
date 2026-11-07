@@ -25,6 +25,15 @@ assert.deepEqual(playbackPlan(paragraphs,0,"a",["a","b","c","d"],2,0,3,0),[
 ]);
 assert.deepEqual(playbackPlan(paragraphs,5,"a",["a","b","c"],0,0,3,0),[{index:5,voice:"b"},{index:5,voice:"c"}]);
 assert.deepEqual(playbackPlan(paragraphs,0,"a",["a","b"],2,0,1,0),rotationPlan(paragraphs,0,"a",["a","b"],2,0));
+assert.deepEqual(voiceSequence("b",["f","a","b","c"],3,"f"),["f","b","c"]);
+assert.deepEqual(voiceSequence("f",["f","a"],99,"f"),["f","a"]);
+assert.deepEqual(voiceSequence("f",["f"],3,"f"),["f"]);
+assert.deepEqual(voiceSequence("a",["a","b"],1,"f"),["f"]);
+assert.deepEqual(playbackPlan(paragraphs,0,"a",["f","a","b","c"],2,0,3,0,6,"f"),[
+  {index:0,voice:"a"},{index:0,voice:"b"},{index:3,voice:"f"},
+  {index:3,voice:"a"},{index:3,voice:"b"},{index:5,voice:"f"},
+]);
+assert.deepEqual(playbackPlan(paragraphs,0,"a",["a","b"],1,0,1,0,6,"f"),[{index:3,voice:"f"},{index:5,voice:"f"}]);
 
 class Element {
   constructor() {
@@ -201,6 +210,41 @@ async function run() {
     if (step<2) assert.match(get("rotationStatus").textContent,/本轮 0\/2/,"repetitions do not count as separate paragraphs");
   }
   assert.equal(audio.src,"","finish only after the final paragraph's last repetition");
+  // Pin Furina to the first pass even when the filter only lists cloud voices.
+  get("voice").value=a; get("voice").emit("change"); await flush();
+  get("furinaFirst").checked=true; get("furinaFirst").emit("change"); await flush();
+  assert.equal(get("paragraphRepeat").checked,true,"pinning Furina enables paragraph repetition");
+  get("rewind").emit("click"); await flush();
+  const f="furina-local-en";
+  const pinnedSteps=[[0,f],[0,a],[0,c],[3,f],[3,a],[3,c],[5,f],[5,c],[5,s]];
+  assert.equal(plans.at(-1)[0].voice,a,"prefetch schedules the first rotating voice after Furina");
+  assert.equal(plans.at(-1)[2].voice,f,"next paragraph is also prefetched with Furina first");
+  for(let step=0;step<pinnedSteps.length;step++) {
+    const [paragraph,voice]=pinnedSteps[step];
+    assert.equal(audio.src,`/audio/${paragraph}.mp3`);
+    assert.equal(get("voice").value,voice,"Furina stays fixed while only the other voices rotate");
+    assert.match(get("repeatStatus").textContent,/芙宁娜首遍/);
+    if(step===1) {
+      audio.pause();
+      get("furinaFirst").checked=false; get("furinaFirst").emit("change"); await flush();
+      get("furinaFirst").checked=true; get("furinaFirst").emit("change"); await flush();
+      assert.equal(audio.paused,true,"enabling the mode preserves paused playback");
+      assert.equal(get("voice").value,f,"enabling midway restarts this paragraph with Furina");
+      assert.match(get("repeatStatus").textContent,/第 1\/3/);
+      audio.paused=true; audio.emit("ended"); await flush();
+      assert.equal(get("voice").value,a,"the rotating group resumes after the pinned first pass");
+    }
+    audio.paused=true; audio.emit("ended"); await flush();
+  }
+  assert.equal(audio.src,"");
+  get("repeatEvery").value="1"; get("repeatEvery").emit("change"); await flush();
+  get("rewind").emit("click"); await flush();
+  for(const paragraph of [0,3,5]) {
+    assert.equal(audio.src,`/audio/${paragraph}.mp3`);
+    assert.equal(get("voice").value,f,"one total pass means Furina only");
+    audio.paused=true; audio.emit("ended"); await flush();
+  }
+  get("furinaFirst").checked=false; get("furinaFirst").emit("change");
   get("paragraphRepeat").checked=false; get("paragraphRepeat").emit("change");
   get("voiceRotation").checked=false; get("voiceRotation").emit("change");
   failure = true;
@@ -213,6 +257,6 @@ async function run() {
   get("play").emit("click"); await flush();
   assert.equal(requests.length, count);
   assert.equal(audio.src, "");
-  console.log("Reader checks passed: combined paragraph repetitions and base-voice rotation, planned prefetch, filters, speed, symbols, seek, retry, errors");
+  console.log("Reader checks passed: Furina-first mode and paused activation, combined repetitions and rotation, planned prefetch, filters, speed, symbols, seek, retry, errors");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

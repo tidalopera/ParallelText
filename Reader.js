@@ -23,22 +23,31 @@
     }
     return plan;
   };
-  const voiceSequence = (first, order, count) => {
+  const voiceSequence = (first, order, count, fixed = null) => {
+    if (fixed) {
+      const others = [...new Set([...(first !== fixed && !order.includes(first) ? [first] : []), ...order.filter(v => v !== fixed)])];
+      if (count <= 1 || !others.length) return [fixed];
+      return [fixed, ...voiceSequence(first === fixed ? others[0] : first, others, count-1)];
+    }
     const pool = [...new Set([...(order.includes(first) ? [] : [first]), ...order])];
     const start = pool.indexOf(first);
     return Array.from({ length: Math.max(1, Math.min(count, pool.length)) }, (_, i) => pool[(start+i)%pool.length]);
   };
-  const playbackPlan = (paragraphs, index, first, order, every, completed, repeats, pass, count = 6) => {
+  const playbackPlan = (paragraphs, index, first, order, every, completed, repeats, pass, count = 6, fixed = null) => {
+    if (fixed) {
+      order = order.filter(v => v !== fixed);
+      if (first === fixed) first = order[0] || fixed;
+    }
     const plan = [];
     while (plan.length < count) {
-      const sequence = voiceSequence(first, order, repeats);
+      const sequence = voiceSequence(first, order, repeats, fixed);
       if (++pass >= sequence.length) {
         index = nextSpeakable(paragraphs, index+1);
         if (index < 0) break;
         ({ voice:first, completed } = advanceRotation(first, order, every, completed));
         pass = 0;
       }
-      plan.push({ index, voice: voiceSequence(first, order, repeats)[pass] });
+      plan.push({ index, voice: voiceSequence(first, order, repeats, fixed)[pass] });
     }
     return plan;
   };
@@ -104,21 +113,24 @@
     const n = Number($("repeatEvery").value);
     return $("paragraphRepeat").checked && Number.isInteger(n) && n >= 1 ? n : 1;
   }
-  function currentSequence() { return voiceSequence(paragraphBaseVoice || $("voice").value, matchingVoices().map(v => v.id), repeatEvery()); }
+  function pinnedVoice() { return $("furinaFirst").checked ? "furina-local-en" : null; }
+  function rotationOrder() { return matchingVoices().map(v => v.id).filter(id => id !== pinnedVoice()); }
+  function currentSequence() { return voiceSequence(paragraphBaseVoice || $("voice").value, rotationOrder(), repeatEvery(), pinnedVoice()); }
   function updateRepeats() {
     const sequence = currentSequence();
     const first = voices.find(v => v.id === paragraphBaseVoice);
-    $("repeatStatus").textContent = $("paragraphRepeat").checked ? `本段第 ${repeatPass+1}/${sequence.length} 遍 · 起始 ${first?.name || "当前声音"}` : "逐段复读已关闭";
+    $("repeatStatus").textContent = $("paragraphRepeat").checked || pinnedVoice() ? `本段第 ${repeatPass+1}/${sequence.length} 遍 · ${pinnedVoice() ? "芙宁娜首遍 · 其他起始" : "起始"} ${first?.name || "当前声音"}` : "逐段复读已关闭";
   }
   function updateRotation() {
     const every = rotationEvery();
-    const count = matchingVoices().length;
+    const count = rotationOrder().length;
     $("rotationStatus").textContent = every ? `本轮 ${rotationCompleted}/${every} 段 · ${count ? `按筛选后的 ${count} 个声音循环` : "无匹配音色，保持当前声音"}` : "自动换声已关闭";
     updateRepeats();
   }
   function resetRotation(first = $("voice").value) {
+    if (pinnedVoice() && first === pinnedVoice()) first = rotationOrder()[0] || first;
     rotationCompleted = 0; repeatPass = 0; paragraphBaseVoice = first;
-    const maximum = voiceSequence(first, matchingVoices().map(v => v.id), Math.max(1, voices.length)).length;
+    const maximum = voiceSequence(first, rotationOrder(), Math.max(1, voices.length), pinnedVoice()).length;
     $("repeatEvery").max = String(maximum);
     $("repeatEvery").value = String(Math.max(1,Math.min(maximum,Math.trunc(Number($("repeatEvery").value) || 1))));
     updateRotation();
@@ -327,8 +339,8 @@
     return jsonRequest("/api/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ index: i, voice }), signal });
   }
   function warmAhead(i, voice) {
-    const plan = rotationEvery() || $("paragraphRepeat").checked
-      ? playbackPlan(book, i, paragraphBaseVoice || voice, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted, repeatEvery(), repeatPass) : null;
+    const plan = rotationEvery() || $("paragraphRepeat").checked || pinnedVoice()
+      ? playbackPlan(book, i, paragraphBaseVoice || voice, rotationOrder(), rotationEvery(), rotationCompleted, repeatEvery(), repeatPass, 6, pinnedVoice()) : null;
     return jsonRequest("/api/prefetch", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ index: i, voice, count: 6, ...(plan ? { plan } : {}) }) }).catch(() => {});
   }
@@ -383,7 +395,7 @@
 
   async function navigate(target, { autoplay = true, offset = 0, fromEnd = false, automatic = false } = {}) {
     if (!book.length || stopped) return;
-    if (!automatic) { resetRotation(paragraphBaseVoice || $("voice").value); filterVoices(paragraphBaseVoice); }
+    if (!automatic) { resetRotation(paragraphBaseVoice || $("voice").value); filterVoices(currentSequence()[0]); }
     const ownRevision = ++revision;
     if (controller) controller.abort();
     controller = new AbortController();
@@ -489,16 +501,27 @@
   });
   $("voice").addEventListener("change", () => { resetRotation(); if (audio.src || loading) navigate(index, { autoplay: desiredPlay }); });
   const refreshPlan = () => { if (book.length && (audio.src || loading)) warmAhead(index, $("voice").value); };
-  const filtersChanged = () => { resetRotation(); filterVoices(); refreshPlan(); };
+  const refreshCycle = () => {
+    resetRotation();
+    if (pinnedVoice()) {
+      filterVoices(currentSequence()[0]);
+      if (audio.src || loading) navigate(index, { autoplay:desiredPlay });
+    } else refreshPlan();
+  };
+  const filtersChanged = () => { refreshCycle(); filterVoices(); };
   $("voiceSearch").addEventListener("input", filtersChanged);
   $("voiceLanguage").addEventListener("change", filtersChanged);
-  $("voiceRotation").addEventListener("change", () => { resetRotation(); refreshPlan(); });
+  $("voiceRotation").addEventListener("change", refreshCycle);
   $("voiceEvery").addEventListener("change", () => {
     $("voiceEvery").value = String(Math.max(1, Math.min(1000, Math.trunc(Number($("voiceEvery").value) || 1))));
-    resetRotation(); refreshPlan();
+    refreshCycle();
   });
-  $("paragraphRepeat").addEventListener("change", () => { resetRotation(); refreshPlan(); });
-  $("repeatEvery").addEventListener("change", () => { resetRotation(); refreshPlan(); });
+  $("paragraphRepeat").addEventListener("change", refreshCycle);
+  $("repeatEvery").addEventListener("change", refreshCycle);
+  $("furinaFirst").addEventListener("change", () => {
+    if (pinnedVoice()) $("paragraphRepeat").checked = true;
+    refreshCycle();
+  });
   $("follow").addEventListener("change", followCurrent);
   $("timeline").addEventListener("input", () => { if (Number.isFinite(audio.duration)) { audio.currentTime = Number($("timeline").value); updateTimeline(); } });
   audio.addEventListener("timeupdate", updateTimeline);
@@ -515,15 +538,15 @@
     }
     repeatPass = 0;
     const next = nextSpeakable(book, index + 1);
-    const advanced = advanceRotation(paragraphBaseVoice || $("voice").value, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted);
+    const advanced = advanceRotation(paragraphBaseVoice || $("voice").value, rotationOrder(), rotationEvery(), rotationCompleted);
     rotationCompleted = advanced.completed;
     if (next >= 0) {
       paragraphBaseVoice = advanced.voice;
-      filterVoices(advanced.voice);
+      filterVoices(currentSequence()[0]);
       navigate(next, { autoplay: true, automatic: true });
     } else {
       index = book.length - 1; words = []; loadedVoice = null; desiredPlay = false;
-      filterVoices(paragraphBaseVoice);
+      filterVoices(currentSequence()[0]);
       audio.removeAttribute("src"); audio.load();
       renderReading(); updateTimeline(); updateRotation(); updateControls(); status("全书朗读完成");
     }
