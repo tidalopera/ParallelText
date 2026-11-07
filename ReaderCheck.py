@@ -20,9 +20,11 @@ def main():
                 result.set_result({"audio": "/audio/test.mp3", "words": []})
                 return result
         actual_pool = store.pool
+        actual_local_pool = store.local_pool
         try:
             pool = Pool()
             store.pool = pool
+            store.local_pool = pool
             for index in range(5):
                 assert store.request(index, r.VOICES[0]["id"])["state"] == "skipped"
             assert not pool.calls and not store.entries and not list(Path(directory).iterdir())
@@ -31,6 +33,7 @@ def main():
             assert len(pool.calls) == 4
         finally:
             store.pool = actual_pool
+            store.local_pool = actual_local_pool
             store.close()
     print("SpeechStore checks passed: symbols bypass TTS/cache; words and numbers are synthesized")
 

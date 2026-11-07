@@ -34,6 +34,11 @@ assert.deepEqual(playbackPlan(paragraphs,0,"a",["f","a","b","c"],2,0,3,0,6,"f"),
   {index:3,voice:"a"},{index:3,voice:"b"},{index:5,voice:"f"},
 ]);
 assert.deepEqual(playbackPlan(paragraphs,0,"a",["a","b"],1,0,1,0,6,"f"),[{index:3,voice:"f"},{index:5,voice:"f"}]);
+const longBook=Array.from({length:50},(_,i)=>({english:i%2 ? "..." : "Words"}));
+const twenty=playbackPlan(longBook,0,"a",["a","b","c"],2,0,3,0,63,null,20);
+assert.equal(twenty.length,62,"20 future paragraphs include all voices plus current remaining passes");
+assert.equal(new Set(twenty.filter(x=>x.index>0).map(x=>x.index)).size,20);
+assert.equal(Math.max(...twenty.map(x=>x.index)),40,"symbol-only paragraphs do not consume the 20-paragraph window");
 
 class Element {
   constructor() {
@@ -98,10 +103,10 @@ async function run() {
         const { plan } = JSON.parse(options.body);
         if (plan) {
           plans.push(plan);
-          assert.ok(plan.length <= count);
+          assert.ok(new Set(plan.filter(item=>item.index>index).map(item=>item.index)).size <= count);
           assert.ok(plan.every(item => item.index >= index && hasSpeech(paragraphs[item.index].english)));
         }
-        assert.equal(count, 6);
+        assert.equal(count, 20);
         assert.equal(hasSpeech(paragraphs[index].english), true);
         return { ok: true, json: async () => ({ state: "scheduled" }) };
       }

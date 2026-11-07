@@ -10,6 +10,33 @@ from SpeechCache import DiskCache, FurinaClient
 
 
 class CacheTests(unittest.TestCase):
+    def test_evicted_audio_is_regenerated_instead_of_reusing_stale_future(self):
+        with TemporaryDirectory() as directory:
+            store=r.CachedSpeechStore([{"english":"Test words."}],Path(directory))
+            def fake(text,path,background):
+                with wave.open(str(path),"wb") as audio:
+                    audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(32000);audio.writeframes(b"\0\1"*3200)
+            try:
+                with patch.object(store.client,"generate",side_effect=fake) as generate:
+                    key=store.key(0,"furina-local-en")
+                    store.request(0,"furina-local-en");store.entries[key].result(timeout=3)
+                    (Path(directory)/(key+".json")).unlink()
+                    (Path(directory)/(key+".wav")).unlink()
+                    store.request(0,"furina-local-en");store.entries[key].result(timeout=3)
+                    self.assertEqual(generate.call_count,2)
+                    self.assertGreater(len(store.audio(key)),44)
+            finally:store.close()
+
+    def test_prefetch_plan_respects_cache_budget(self):
+        with TemporaryDirectory() as directory:
+            store=r.CachedSpeechStore([{"english":"Words"} for _ in range(3)],Path(directory),{"speechCacheBytes":10000})
+            try:
+                result=store.prefetch_plan(0,"en-US-AriaNeural",[{"index":1,"voice":"en-US-AriaNeural"}])
+                self.assertEqual(result["indices"],[])
+                self.assertTrue(store.prefetch_status()["cacheBudgetLimited"])
+                self.assertLessEqual(store.cache.stats()["bytes"],10000)
+            finally:store.close()
+
     def test_quota_and_restart(self):
         with TemporaryDirectory() as directory:
             cache = DiskCache(directory, 1500)

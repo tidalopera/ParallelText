@@ -33,17 +33,20 @@
     const start = pool.indexOf(first);
     return Array.from({ length: Math.max(1, Math.min(count, pool.length)) }, (_, i) => pool[(start+i)%pool.length]);
   };
-  const playbackPlan = (paragraphs, index, first, order, every, completed, repeats, pass, count = 6, fixed = null) => {
+  const playbackPlan = (paragraphs, index, first, order, every, completed, repeats, pass, count = 6, fixed = null, paragraphsAhead = null) => {
     if (fixed) {
       order = order.filter(v => v !== fixed);
       if (first === fixed) first = order[0] || fixed;
     }
     const plan = [];
+    let ahead = 0;
     while (plan.length < count) {
       const sequence = voiceSequence(first, order, repeats, fixed);
       if (++pass >= sequence.length) {
+        if (paragraphsAhead !== null && ahead >= paragraphsAhead) break;
         index = nextSpeakable(paragraphs, index+1);
         if (index < 0) break;
+        ++ahead;
         ({ voice:first, completed } = advanceRotation(first, order, every, completed));
         pass = 0;
       }
@@ -193,6 +196,7 @@
       const labels = { "preparing":"预生成中", "paused-resources":"资源忙，已暂停", "cache-full":"缓存已满", "complete":"已到全文末尾", "error":"预生成出错", "idle":"待机" };
       $("cacheStatus").textContent = `音频缓存 ${(data.bytes / 1e6).toFixed(1)} / ${(data.limitBytes / 1e6).toFixed(0)} MB · ${labels[job.state] || job.state}${Number.isInteger(job.next) ? ` · 第 ${job.next + 1} 段` : ""}${job.message ? ` · ${job.message}` : ""}`;
       if (data.repairs?.state === "regenerating") $("cacheStatus").textContent += ` · 修订音频重建 ${data.repairs.done}/${data.repairs.total}`;
+      if (data.prefetch?.jobs) $("cacheStatus").textContent += ` · 播放预取 ${data.prefetch.paragraphs} 段，${data.prefetch.ready}/${data.prefetch.jobs} 音频就绪${data.prefetch.cacheBudgetLimited ? "（缓存预算限制）" : ""}`;
       if (data.model?.released) $("cacheStatus").textContent += ` · 模型已释放，空闲 ${(data.model.availableBytes/1e9).toFixed(1)}GB，重载需约 ${(data.model.reloadRequiredBytes/1e9).toFixed(1)}GB`;
       if (data.model?.loading) $("cacheStatus").textContent += " · 正在重新加载模型";
       if (loading && $("voice").value === "furina-local-en" && (data.resources?.busy || data.model?.released || data.model?.loading)) status("低内存时释放模型，恢复后自动重载；已缓存段落可直接播放");
@@ -340,9 +344,9 @@
   }
   function warmAhead(i, voice) {
     const plan = rotationEvery() || $("paragraphRepeat").checked || pinnedVoice()
-      ? playbackPlan(book, i, paragraphBaseVoice || voice, rotationOrder(), rotationEvery(), rotationCompleted, repeatEvery(), repeatPass, 6, pinnedVoice()) : null;
+      ? playbackPlan(book, i, paragraphBaseVoice || voice, rotationOrder(), rotationEvery(), rotationCompleted, repeatEvery(), repeatPass, 21*repeatEvery(), pinnedVoice(), 20) : null;
     return jsonRequest("/api/prefetch", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ index: i, voice, count: 6, ...(plan ? { plan } : {}) }) }).catch(() => {});
+      body: JSON.stringify({ index: i, voice, count: 20, ...(plan ? { plan } : {}) }) }).catch(() => {});
   }
   async function speechReady(i, voice, signal) {
     const deadline = Date.now() + (voice === "furina-local-en" ? 1200000 : 85000);

@@ -97,15 +97,26 @@ class BusyError(Exception):
 
 
 class SpeechStore:
-    def __init__(self, book, directory):
+    def __init__(self, book, directory, edge_workers=2):
+        if type(edge_workers) is not int or not 1 <= edge_workers <= 4:
+            raise ValueError("edgePrefetchWorkers must be an integer between 1 and 4")
         self.book, self.directory = book, directory
+        self.edge_workers = edge_workers
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Speech")
-        self.prefetch_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="Prefetch")
+        self.prefetch_pool = ThreadPoolExecutor(max_workers=edge_workers, thread_name_prefix="EdgePrefetch")
+        self.local_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="FurinaSpeech")
         self.lock = threading.Lock()
         self.entries = {}
         self.background = set()
         self.current_key = None
         self.stopped = threading.Event()
+        self.local_keys = set()
+        self.prefetch_targets = []
+        self.prefetch_keys = set()
+        self.prefetch_origin = 0
+        self.prefetch_retry = {}
+        self.prefetch_event = threading.Event()
+        self.prefetch_thread = None
 
     def key(self, index, voice):
         return hashlib.sha256(f"{index}:{voice}".encode()).hexdigest()[:24]
@@ -121,20 +132,30 @@ class SpeechStore:
             if not background and key in self.entries and self.entries[key].cancel():
                 del self.entries[key]
                 self.background.discard(key)
-            if key in self.entries and self.entries[key].done() and self.entries[key].exception():
+            if key in self.entries and self.entries[key].done() and (self.entries[key].cancelled() or self.entries[key].exception()):
                 del self.entries[key]
                 self.background.discard(key)
             if key not in self.entries:
-                if background and sum(not f.done() for f in self.entries.values()) >= 8:
-                    raise BusyError("正在准备其他语音，请稍候。")
+                local = voice == "furina-local-en"
+                if background:
+                    if local:
+                        pending = sum(not f.done() for k,f in self.entries.items() if k in self.local_keys)
+                        planned = {self.key(x["index"],x["voice"]) for x in self.prefetch_targets if x["voice"] == "furina-local-en"}
+                        urgent = any(k not in self.entries or not self.entries[k].done() or self.entries[k].cancelled() or self.entries[k].exception() for k in planned)
+                        if pending >= 1 or (key not in planned and urgent):
+                            raise BusyError("正在准备优先朗读的本机语音。")
+                    elif sum(not f.done() for k,f in self.entries.items() if k in self.background and k not in self.local_keys) >= self.edge_workers+1:
+                        raise BusyError("Edge 预取名额已满，任务会继续排队。")
                 self._prune()
-                pool = self.prefetch_pool if background else self.pool
-                self.entries[key] = pool.submit(self._generate, index, voice, key)
+                pool = self.local_pool if local else self.prefetch_pool if background else self.pool
+                if local:
+                    self.local_keys.add(key)
                 if background:
                     self.background.add(key)
+                self.entries[key] = pool.submit(self._generate, index, voice, key)
             return self._status(key)
 
-    def prefetch(self, index, voice, count=6):
+    def prefetch(self, index, voice, count=20):
         wanted = []
         for i in range(index+1, len(self.book)):
             if has_speech(self.book[i]["english"]):
@@ -144,27 +165,72 @@ class SpeechStore:
         return self.prefetch_plan(index, voice, [{"index": i, "voice": voice} for i in wanted])
 
     def prefetch_plan(self, index, voice, plan):
-        keep = {self.key(index, voice), *(self.key(item["index"], item["voice"]) for item in plan)}
+        keep = {self.current_key, self.key(index, voice), *(self.key(item["index"], item["voice"]) for item in plan)}
         with self.lock:
+            self.prefetch_origin = index
+            self.prefetch_targets = [dict(item) for item in plan]
+            self.prefetch_keys = {self.key(x["index"],x["voice"]) for x in plan}
+            self.prefetch_retry = {k:v for k,v in self.prefetch_retry.items() if k in keep}
             for key in list(self.entries):
                 if key in self.background and key not in keep and not self.entries[key].done() and self.entries[key].cancel():
                     del self.entries[key]
                     self.background.discard(key)
-        scheduled = []
-        for item in plan:
-            try:
-                self.request(item["index"], item["voice"], background=True)
-                scheduled.append(item["index"])
-            except BusyError:
-                break
-        return {"state": "scheduled", "indices": scheduled}
+            if self.prefetch_thread is None:
+                self.prefetch_thread = threading.Thread(target=self._prefetch_loop,daemon=True,name="PlaybackPrefetch")
+                self.prefetch_thread.start()
+        self.prefetch_event.set()
+        return {"state": "scheduled", "indices": [item["index"] for item in plan]}
+
+    def _prefetch_loop(self):
+        while not self.stopped.is_set():
+            self.prefetch_event.wait(.5)
+            self.prefetch_event.clear()
+            with self.lock:
+                targets = list(self.prefetch_targets)
+            for item in targets:
+                if self.stopped.is_set(): return
+                key = self.key(item["index"],item["voice"])
+                with self.lock:
+                    if targets != self.prefetch_targets: break
+                    previous = self.prefetch_retry.get(key)
+                    if previous and time.monotonic() < previous[2]: continue
+                    future = self.entries.get(key)
+                    if future:
+                        if not future.done(): continue
+                        if not future.cancelled() and future.exception() is None: continue
+                        if previous is None or previous[0] is not future:
+                            attempts = previous[1]+1 if previous else 1
+                            self.prefetch_retry[key] = (future,attempts,time.monotonic()+min(30,2**min(attempts,5)))
+                            continue
+                try:
+                    self.request(item["index"],item["voice"],background=True)
+                except BusyError:
+                    continue
+                except Exception as error:
+                    logging.warning("Prefetch will retry paragraph %s: %s",item["index"]+1,error)
+                    with self.lock:
+                        self.prefetch_retry[key] = (None,1,time.monotonic()+5)
+
+    def prefetch_status(self):
+        with self.lock:
+            ready = pending = failed = 0
+            for item in self.prefetch_targets:
+                future = self.entries.get(self.key(item["index"],item["voice"]))
+                if not future: continue
+                if not future.done(): pending += 1
+                elif future.cancelled() or future.exception(): failed += 1
+                else: ready += 1
+            return {"paragraphs":len({x["index"] for x in self.prefetch_targets if x["index"] > self.prefetch_origin}),
+                    "jobs":len(self.prefetch_targets),"ready":ready,"pending":pending,"failed":failed,
+                    "waiting":len(self.prefetch_targets)-ready-pending-failed,"edgeWorkers":self.edge_workers,"localWorkers":1,
+                    "cacheBudgetLimited":getattr(self,"prefetch_budget_limited",False)}
 
     def _prune(self):
         total = sum(p.stat().st_size for p in self.directory.glob("*.mp3"))
         for key in list(self.entries):
             if len(self.entries) < 96 and total < 64 * 1024 * 1024:
                 break
-            if key != self.current_key and self.entries[key].done():
+            if key != self.current_key and key not in self.prefetch_keys and self.entries[key].done():
                 path = self.directory / f"{key}.mp3"
                 if path.exists():
                     total -= path.stat().st_size
@@ -239,14 +305,17 @@ class SpeechStore:
 
     def close(self):
         self.stopped.set()
+        self.prefetch_event.set()
+        if self.prefetch_thread: self.prefetch_thread.join(timeout=2)
         self.prefetch_pool.shutdown(wait=True, cancel_futures=True)
+        self.local_pool.shutdown(wait=True, cancel_futures=True)
         self.pool.shutdown(wait=True, cancel_futures=True)
 
 
 class CachedSpeechStore(SpeechStore):
     def __init__(self, book, directory, settings=None):
-        super().__init__(book, directory)
         self.settings = settings or {}
+        super().__init__(book, directory, self.settings.get("edgePrefetchWorkers",2))
         self.identity = book_id(book)
         self.cache = DiskCache(directory, int(self.settings.get("speechCacheBytes", 1_000_000_000)))
         self.monitor = ResourceMonitor(self.settings.get("furinaPidFile"))
@@ -269,6 +338,10 @@ class CachedSpeechStore(SpeechStore):
         if not background:
             self.anchor = index
         with self.lock:
+            existing = self.entries.get(key)
+            if existing and existing.done() and not existing.cancelled() and existing.exception() is None and not self.cache.get(key):
+                del self.entries[key]
+                self.background.discard(key)
             if key not in self.entries:
                 cached = self.cache.get(key)
                 if cached:
@@ -283,7 +356,7 @@ class CachedSpeechStore(SpeechStore):
     def _prune(self):
         self.cache.prune(self.current_key)
         for key in list(self.entries):
-            if key != self.current_key and self.entries[key].done() and (len(self.entries) > 256 or not (self.directory/(key+".json")).exists()):
+            if key != self.current_key and key not in self.prefetch_keys and self.entries[key].done() and (len(self.entries) > 256 or not (self.directory/(key+".json")).exists()):
                 del self.entries[key]
                 self.background.discard(key)
 
@@ -305,11 +378,25 @@ class CachedSpeechStore(SpeechStore):
         if not data: raise KeyError("Audio cache expired")
         return (self.directory/(key+"."+data["format"])).read_bytes()
 
-    def prefetch(self, index, voice, count=6):
+    def prefetch(self, index, voice, count=20):
         if voice == "furina-local-en":
+            result = super().prefetch(index,voice,count)
             self.start_preparation(index+1, voice)
-            return {"state":"scheduled", "indices":[], "preparation":self.preparation}
+            return {**result,"preparation":self.preparation}
         return super().prefetch(index, voice, count)
+
+    def prefetch_plan(self,index,voice,plan):
+        # Keep the nearest playback jobs when a very large voice/repetition set
+        # would exceed the shared disk budget. Foreground requests remain allowed.
+        accepted, size = [], 0
+        for item in plan:
+            cached = self.cache.get(self.key(item["index"],item["voice"]))
+            estimate = cached["bytes"] if cached else len(self.book[item["index"]]["english"])*(5000 if item["voice"] == "furina-local-en" else 500)+12000
+            if size+estimate > self.cache.limit*.9: break
+            size += estimate
+            accepted.append(item)
+        self.prefetch_budget_limited = len(accepted) < len(plan)
+        return super().prefetch_plan(index,voice,accepted)
 
     def start_repairs(self, items):
         self.repairs = {"state":"regenerating", "done":0, "total":len(items), "errors":[]}
@@ -437,7 +524,8 @@ def make_handler(book, store):
                                       extra={"Vary": "Accept-Encoding", **({"Content-Encoding": "gzip"} if compressed else {})})
                 if parsed.path == "/api/cache" and isinstance(store, CachedSpeechStore):
                     return self._json({**store.cache.stats(), "preparation":store.preparation, "resources":store.monitor.state,
-                                       "repairs":store.repairs,"playbackIndex":store.anchor,"model":store.guard.status})
+                                       "repairs":store.repairs,"playbackIndex":store.anchor,"model":store.guard.status,
+                                       "prefetch":store.prefetch_status()})
                 if parsed.path == "/api/speech":
                     return self._json(store.status(parse_qs(parsed.query).get("key", [""])[0]))
                 match = re.fullmatch(r"/audio/([a-f0-9]{24})\.(mp3|wav)", parsed.path)
@@ -474,7 +562,7 @@ def make_handler(book, store):
                 return self._json({"message": "Expected JSON"}, 415)
             try:
                 size = int(self.headers.get("Content-Length", "0"))
-                if not 0 < size <= 2048:
+                if not 0 < size <= 262144:
                     raise ValueError("Invalid request size")
                 payload = json.loads(self.rfile.read(size))
                 if not isinstance(payload, dict):
@@ -489,15 +577,16 @@ def make_handler(book, store):
                 if type(index) is not int or not 0 <= index < len(book) or not isinstance(voice, str) or voice not in VOICE_IDS:
                     raise ValueError("Invalid paragraph or voice")
                 if self.path == "/api/prefetch":
-                    count = payload.get("count", 6)
-                    if type(count) is not int or not 1 <= count <= 8:
-                        raise ValueError("Prefetch count must be between 1 and 8")
+                    count = payload.get("count", 20)
+                    if type(count) is not int or not 1 <= count <= 20:
+                        raise ValueError("Prefetch count must be between 1 and 20")
                     if "plan" in payload:
                         plan = payload["plan"]
-                        if not isinstance(plan, list) or len(plan) > count:
+                        if not isinstance(plan, list) or len(plan) > (count+1)*len(VOICE_IDS):
                             raise ValueError("Invalid prefetch plan")
                         previous = index
                         seen = {(index, voice)}
+                        paragraphs = set()
                         for item in plan:
                             if (not isinstance(item, dict) or set(item) != {"index", "voice"}
                                 or type(item["index"]) is not int or not previous <= item["index"] < len(book)
@@ -508,6 +597,9 @@ def make_handler(book, store):
                             if pair in seen:
                                 raise ValueError("Duplicate prefetch plan item")
                             seen.add(pair)
+                            if item["index"] > index: paragraphs.add(item["index"])
+                            if len(paragraphs) > count:
+                                raise ValueError("Prefetch plan exceeds paragraph limit")
                             previous = item["index"]
                         return self._json(store.prefetch_plan(index, voice, plan))
                     return self._json(store.prefetch(index, voice, count))
