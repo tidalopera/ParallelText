@@ -23,6 +23,25 @@
     }
     return plan;
   };
+  const voiceSequence = (first, order, count) => {
+    const pool = [...new Set([...(order.includes(first) ? [] : [first]), ...order])];
+    const start = pool.indexOf(first);
+    return Array.from({ length: Math.max(1, Math.min(count, pool.length)) }, (_, i) => pool[(start+i)%pool.length]);
+  };
+  const playbackPlan = (paragraphs, index, first, order, every, completed, repeats, pass, count = 6) => {
+    const plan = [];
+    while (plan.length < count) {
+      const sequence = voiceSequence(first, order, repeats);
+      if (++pass >= sequence.length) {
+        index = nextSpeakable(paragraphs, index+1);
+        if (index < 0) break;
+        ({ voice:first, completed } = advanceRotation(first, order, every, completed));
+        pass = 0;
+      }
+      plan.push({ index, voice: voiceSequence(first, order, repeats)[pass] });
+    }
+    return plan;
+  };
   const playerShouldShow = (y, height, inside, focused, visible) => focused || (y >= height - 12 && y <= height) || (visible && inside);
   const centerPosition = (center, height) => ({ padding: Math.max(0, height / 2 - center), scroll: Math.max(0, center - height / 2) });
   const formatTime = seconds => {
@@ -46,7 +65,7 @@
   };
   // Pure functions can be checked in Node without controlling a user's browser.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { normalize, visibleRange, hasSpeech, nextSpeakable, formatTime, activeWord, findMatches, playerShouldShow, centerPosition, advanceRotation, rotationPlan };
+    module.exports = { normalize, visibleRange, hasSpeech, nextSpeakable, formatTime, activeWord, findMatches, playerShouldShow, centerPosition, advanceRotation, rotationPlan, voiceSequence, playbackPlan };
     return;
   }
 
@@ -57,6 +76,7 @@
   let frame = null, loadedVoice = null, stopped = false;
   let voices = [];
   let rotationCompleted = 0;
+  let paragraphBaseVoice = "", repeatPass = 0;
 
   const languageNames = new Intl.DisplayNames(["zh-CN"], { type: "language" });
   function voiceLocale(voice) { return voice.locale || (voice.id === "furina-local-en" ? "local" : voice.id.split("-").slice(0, 2).join("-")); }
@@ -80,12 +100,29 @@
     const n = Number($("voiceEvery").value);
     return $("voiceRotation").checked && Number.isInteger(n) && n >= 1 && n <= 1000 ? n : 0;
   }
+  function repeatEvery() {
+    const n = Number($("repeatEvery").value);
+    return $("paragraphRepeat").checked && Number.isInteger(n) && n >= 1 ? n : 1;
+  }
+  function currentSequence() { return voiceSequence(paragraphBaseVoice || $("voice").value, matchingVoices().map(v => v.id), repeatEvery()); }
+  function updateRepeats() {
+    const sequence = currentSequence();
+    const first = voices.find(v => v.id === paragraphBaseVoice);
+    $("repeatStatus").textContent = $("paragraphRepeat").checked ? `本段第 ${repeatPass+1}/${sequence.length} 遍 · 起始 ${first?.name || "当前声音"}` : "逐段复读已关闭";
+  }
   function updateRotation() {
     const every = rotationEvery();
     const count = matchingVoices().length;
     $("rotationStatus").textContent = every ? `本轮 ${rotationCompleted}/${every} 段 · ${count ? `按筛选后的 ${count} 个声音循环` : "无匹配音色，保持当前声音"}` : "自动换声已关闭";
+    updateRepeats();
   }
-  function resetRotation() { rotationCompleted = 0; updateRotation(); }
+  function resetRotation(first = $("voice").value) {
+    rotationCompleted = 0; repeatPass = 0; paragraphBaseVoice = first;
+    const maximum = voiceSequence(first, matchingVoices().map(v => v.id), Math.max(1, voices.length)).length;
+    $("repeatEvery").max = String(maximum);
+    $("repeatEvery").value = String(Math.max(1,Math.min(maximum,Math.trunc(Number($("repeatEvery").value) || 1))));
+    updateRotation();
+  }
   function filterVoices(preferred) {
     const current = typeof preferred === "string" ? preferred : $("voice").value;
     const matches = matchingVoices();
@@ -115,13 +152,14 @@
     }
     $("voiceLanguage").replaceChildren(fragment); $("voiceLanguage").value = "all";
     filterVoices(data.defaultVoice || "en-US-AriaNeural");
+    resetRotation();
   }
 
   function setupPlayerVisibility() {
     const player = $("player");
     let pointerY = -1, inside = false, keyboard = false;
     const refresh = () => {
-      const focused = (keyboard || ["voiceSearch", "voiceEvery"].includes(document.activeElement?.id)) && player.contains(document.activeElement);
+      const focused = (keyboard || ["voiceSearch", "voiceEvery", "repeatEvery"].includes(document.activeElement?.id)) && player.contains(document.activeElement);
       player.classList.toggle("is-visible", playerShouldShow(pointerY, window.innerHeight, inside, focused, player.classList.contains("is-visible")));
     };
     const move = event => { pointerY = event.clientY; inside = player.contains(event.target); refresh(); };
@@ -289,7 +327,8 @@
     return jsonRequest("/api/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ index: i, voice }), signal });
   }
   function warmAhead(i, voice) {
-    const plan = rotationEvery() ? rotationPlan(book, i, voice, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted) : null;
+    const plan = rotationEvery() || $("paragraphRepeat").checked
+      ? playbackPlan(book, i, paragraphBaseVoice || voice, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted, repeatEvery(), repeatPass) : null;
     return jsonRequest("/api/prefetch", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ index: i, voice, count: 6, ...(plan ? { plan } : {}) }) }).catch(() => {});
   }
@@ -344,7 +383,7 @@
 
   async function navigate(target, { autoplay = true, offset = 0, fromEnd = false, automatic = false } = {}) {
     if (!book.length || stopped) return;
-    if (!automatic) resetRotation();
+    if (!automatic) { resetRotation(paragraphBaseVoice || $("voice").value); filterVoices(paragraphBaseVoice); }
     const ownRevision = ++revision;
     if (controller) controller.abort();
     controller = new AbortController();
@@ -458,6 +497,8 @@
     $("voiceEvery").value = String(Math.max(1, Math.min(1000, Math.trunc(Number($("voiceEvery").value) || 1))));
     resetRotation(); refreshPlan();
   });
+  $("paragraphRepeat").addEventListener("change", () => { resetRotation(); refreshPlan(); });
+  $("repeatEvery").addEventListener("change", () => { resetRotation(); refreshPlan(); });
   $("follow").addEventListener("change", followCurrent);
   $("timeline").addEventListener("input", () => { if (Number.isFinite(audio.duration)) { audio.currentTime = Number($("timeline").value); updateTimeline(); } });
   audio.addEventListener("timeupdate", updateTimeline);
@@ -466,14 +507,23 @@
   audio.addEventListener("pause", () => { if (!loading) { desiredPlay = false; updateControls(); status("已暂停"); } updateHighlight(); });
   audio.addEventListener("ended", () => {
     if (loading || stopped) return;
+    const sequence = currentSequence();
+    if (repeatPass+1 < sequence.length) {
+      ++repeatPass; filterVoices(sequence[repeatPass]);
+      navigate(index, { autoplay:true, automatic:true });
+      return;
+    }
+    repeatPass = 0;
     const next = nextSpeakable(book, index + 1);
-    const advanced = advanceRotation($("voice").value, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted);
+    const advanced = advanceRotation(paragraphBaseVoice || $("voice").value, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted);
     rotationCompleted = advanced.completed;
     if (next >= 0) {
+      paragraphBaseVoice = advanced.voice;
       filterVoices(advanced.voice);
       navigate(next, { autoplay: true, automatic: true });
     } else {
       index = book.length - 1; words = []; loadedVoice = null; desiredPlay = false;
+      filterVoices(paragraphBaseVoice);
       audio.removeAttribute("src"); audio.load();
       renderReading(); updateTimeline(); updateRotation(); updateControls(); status("全书朗读完成");
     }

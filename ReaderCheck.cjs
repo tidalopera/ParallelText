@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const { hasSpeech, nextSpeakable, advanceRotation, rotationPlan } = require("./Reader.js");
+const { hasSpeech, nextSpeakable, advanceRotation, rotationPlan, voiceSequence, playbackPlan } = require("./Reader.js");
 const paragraphs = ["First.", "...", "\u2026\u2014", "Second.", "***", "Third.", "!!!"].map(english => ({ english, chinese: english, chapter: "Test" }));
 assert.equal(hasSpeech("\u2026\u2026\u2014 * () \ud83d\ude42"), false);
 for (const text of ["0", "No...", "caf\u00e9", "\u6d4b\u8bd5"]) assert.equal(hasSpeech(text), true);
@@ -16,6 +16,15 @@ assert.deepEqual(rotationPlan(paragraphs,0,"c",["a","b","c"],1,0), [{index:3,voi
 assert.deepEqual(advanceRotation("a",[],1,0),{voice:"a",completed:0});
 assert.deepEqual(advanceRotation("a",["b"],1,0),{voice:"b",completed:0});
 assert.deepEqual(advanceRotation("a",["b"],0,0),{voice:"a",completed:0});
+assert.deepEqual(voiceSequence("c",["a","b","c","d"],3),["c","d","a"]);
+assert.deepEqual(voiceSequence("x",["a","b"],99),["x","a","b"]);
+assert.deepEqual(voiceSequence("a",[],3),["a"]);
+assert.deepEqual(playbackPlan(paragraphs,0,"a",["a","b","c","d"],2,0,3,0),[
+  {index:0,voice:"b"},{index:0,voice:"c"},{index:3,voice:"a"},
+  {index:3,voice:"b"},{index:3,voice:"c"},{index:5,voice:"b"},
+]);
+assert.deepEqual(playbackPlan(paragraphs,5,"a",["a","b","c"],0,0,3,0),[{index:5,voice:"b"},{index:5,voice:"c"}]);
+assert.deepEqual(playbackPlan(paragraphs,0,"a",["a","b"],2,0,1,0),rotationPlan(paragraphs,0,"a",["a","b"],2,0));
 
 class Element {
   constructor() {
@@ -55,6 +64,7 @@ async function run() {
   get("voice").value = "en-US-AriaNeural";
   get("speed").value = "1";
   get("voiceEvery").value = "3";
+  get("repeatEvery").value = "3";
   const doc = new Element();
   Object.assign(doc, { getElementById: get, createElement: () => new Element(), createDocumentFragment: () => new Element(), createTextNode: text => ({ textContent: text }) });
   const win = new Element();
@@ -80,7 +90,7 @@ async function run() {
         if (plan) {
           plans.push(plan);
           assert.ok(plan.length <= count);
-          assert.ok(plan.every(item => item.index > index && hasSpeech(paragraphs[item.index].english)));
+          assert.ok(plan.every(item => item.index >= index && hasSpeech(paragraphs[item.index].english)));
         }
         assert.equal(count, 6);
         assert.equal(hasSpeech(paragraphs[index].english), true);
@@ -163,6 +173,36 @@ async function run() {
   audio.paused = true; audio.emit("ended"); await flush();
   assert.equal(audio.src, "");
   assert.equal(get("status").textContent, "\u5168\u4e66\u6717\u8bfb\u5b8c\u6210", "trailing symbols finish normally");
+  // Both controls operate together: 3 voices per paragraph, base shifts after 2 paragraphs.
+  get("voiceLanguage").value="cloud"; get("voiceLanguage").emit("change");
+  get("voice").value="en-US-AriaNeural"; get("voice").emit("change"); await flush();
+  get("paragraphRepeat").checked=true; get("repeatEvery").value="99"; get("paragraphRepeat").emit("change");
+  assert.equal(get("repeatEvery").value,"3","repeat count is capped to distinct available voices");
+  get("voiceRotation").checked=true; get("voiceEvery").value="2"; get("voiceRotation").emit("change");
+  get("rewind").emit("click"); await flush();
+  const a="en-US-AriaNeural", c="en-CA-ClaraNeural", s="de-DE-SeraphinaMultilingualNeural";
+  const steps=[[0,a],[0,c],[0,s],[3,a],[3,c],[3,s],[5,c],[5,s],[5,a]];
+  assert.equal(plans.at(-1)[0].index,0,"prefetch includes remaining voices of the current paragraph");
+  assert.equal(plans.at(-1)[0].voice,c);
+  for (let step=0;step<steps.length;step++) {
+    const [paragraph,voice]=steps[step];
+    assert.equal(audio.src,`/audio/${paragraph}.mp3`,"advance only after all repetitions finish");
+    assert.equal(get("voice").value,voice,"fixed voice group starts at the paragraph base");
+    assert.match(get("repeatStatus").textContent,new RegExp(`第 ${step%3+1}/3`));
+    assert.equal(audio.playbackRate,0.93,"repeated audio keeps the selected speed");
+    if (step===0) {
+      audio.pause(); get("speed").emit("input");
+      assert.match(get("repeatStatus").textContent,/第 1\/3/,"pause and speed do not advance repetitions");
+      expireOnce=true;
+    }
+    audio.paused=true; audio.emit("ended");
+    if (step===0) await new Promise(resolve=>setTimeout(resolve,1100));
+    await flush();
+    if (step<2) assert.match(get("rotationStatus").textContent,/本轮 0\/2/,"repetitions do not count as separate paragraphs");
+  }
+  assert.equal(audio.src,"","finish only after the final paragraph's last repetition");
+  get("paragraphRepeat").checked=false; get("paragraphRepeat").emit("change");
+  get("voiceRotation").checked=false; get("voiceRotation").emit("change");
   failure = true;
   get("previous").emit("click"); await flush();
   assert.match(get("status").textContent, /network test/, "real service errors must not be skipped");
@@ -173,6 +213,6 @@ async function run() {
   get("play").emit("click"); await flush();
   assert.equal(requests.length, count);
   assert.equal(audio.src, "");
-  console.log("Reader checks passed: voice rotation and planned prefetch, catalogue filters, continuous speed, symbols, seek, retry, errors");
+  console.log("Reader checks passed: combined paragraph repetitions and base-voice rotation, planned prefetch, filters, speed, symbols, seek, retry, errors");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

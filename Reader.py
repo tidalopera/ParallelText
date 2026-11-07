@@ -497,12 +497,17 @@ def make_handler(book, store):
                         if not isinstance(plan, list) or len(plan) > count:
                             raise ValueError("Invalid prefetch plan")
                         previous = index
+                        seen = {(index, voice)}
                         for item in plan:
                             if (not isinstance(item, dict) or set(item) != {"index", "voice"}
-                                or type(item["index"]) is not int or not previous < item["index"] < len(book)
+                                or type(item["index"]) is not int or not previous <= item["index"] < len(book)
                                 or not isinstance(item["voice"], str) or item["voice"] not in VOICE_IDS
                                 or not has_speech(book[item["index"]]["english"])):
                                 raise ValueError("Invalid prefetch plan item")
+                            pair = (item["index"], item["voice"])
+                            if pair in seen:
+                                raise ValueError("Duplicate prefetch plan item")
+                            seen.add(pair)
                             previous = item["index"]
                         return self._json(store.prefetch_plan(index, voice, plan))
                     return self._json(store.prefetch(index, voice, count))

@@ -38,11 +38,16 @@ class ReaderTests(unittest.TestCase):
                     plan = [{"index":2,"voice":voice},{"index":3,"voice":"en-CA-ClaraNeural"}]
                     with send(plan) as response:self.assertEqual(response.status,200)
                     prefetch.assert_called_once_with(0,voice,plan)
+                    repeated = [{"index":0,"voice":"en-CA-ClaraNeural"},
+                                {"index":2,"voice":voice},{"index":2,"voice":"en-CA-ClaraNeural"}]
+                    with send(repeated) as response:self.assertEqual(response.status,200)
+                    self.assertEqual(prefetch.call_args.args,(0,voice,repeated))
                     for invalid in ([{"index":1,"voice":voice}], [{"index":2,"voice":"invalid"}],
-                                    [{"index":True,"voice":voice}], list(reversed(plan)), plan*4):
+                                    [{"index":True,"voice":voice}], list(reversed(plan)), plan*4,
+                                    [{"index":0,"voice":voice}], [plan[0],plan[0]]):
                         with self.assertRaises(HTTPError) as error:send(invalid)
                         self.assertEqual(error.exception.code,400)
-                    self.assertEqual(prefetch.call_count,1)
+                    self.assertEqual(prefetch.call_count,2)
                 finally:
                     server.shutdown();server.server_close();thread.join(timeout=3);store.close()
 
