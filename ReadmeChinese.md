@@ -27,6 +27,8 @@ uv run python Reader.py
 
 重载时会预留此前观测到的模型分配量和0.5GB余量，并设置30秒冷却，避免卸载腾出内存后立刻重新装满。状态保存在 `Work/Speech/ModelState.json`，侧边栏和 `/api/cache` 可以查看。关闭阅读器会停止后台监管和预生成。Windows GPU计数器缺失时显示null。本机模型仍可能慢于实时，预生成只是提前完成计算。
 
+声音选择器提供随项目附带的全部 Edge 云端声音，可按语言筛选，或搜索名称、口音和性别；筛选不会改变当前声音或触发生成。选择中文等其他语言的音色仍然朗读英文文本，不会翻译内容。启动优先读取本机目录，无需等待联网；执行 `uv run python Voices.py --refresh` 可更新私有的 `Work/Voices.json`，重启服务后生效。文件缺失或损坏时使用项目附带的 `Voices.json`。目录中列出的声音仍可能因服务端变动或网络问题而暂时不可用。
+
 ## 翻译自己的文本
 
 1. 将 `Examples/Settings.json` 复制为 `Config.json`，填写自己有权限使用的翻译模型和分析模型。默认不发送推理强度参数；模型支持时才设置 `reasoningEffort`。

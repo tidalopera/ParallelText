@@ -59,7 +59,12 @@ async function run() {
     document: doc, window: win, console, AbortController, DOMException, setTimeout, clearTimeout, queueMicrotask,
     requestAnimationFrame: () => 1,
     fetch: async (url, options = {}) => {
-      if (url === "/api/book") return { ok: true, json: async () => ({ title: "Test", paragraphs, voices: [] }) };
+      if (url === "/api/book") return { ok: true, json: async () => ({ title: "Test", paragraphs, defaultVoice:"en-US-AriaNeural", voices: [
+        {id:"furina-local-en",name:"Furina"},
+        {id:"en-US-AriaNeural",name:"Aria",locale:"en-US",gender:"Female"},
+        {id:"en-CA-ClaraNeural",name:"Clara",locale:"en-CA",gender:"Female"},
+        {id:"zh-CN-XiaoxiaoNeural",name:"Xiaoxiao",locale:"zh-CN",gender:"Female"},
+      ] }) };
       if (url.startsWith("/api/speech?key=")) return { ok: false, status: 404, json: async () => ({ message:"expired" }) };
       if (url === "/api/prefetch") {
         const { index, count } = JSON.parse(options.body);
@@ -77,6 +82,19 @@ async function run() {
   vm.runInNewContext(fs.readFileSync(require.resolve("./Reader.js"), "utf8"), context);
   await flush();
   const audio = get("audio");
+  assert.equal(get("voice").value, "en-US-AriaNeural", "catalogue preserves the configured default");
+  assert.equal(get("voice").children.length, 4, "all voices are available initially");
+  get("voiceLanguage").value = "zh"; get("voiceLanguage").emit("change");
+  assert.equal(get("voice").children.length, 2, "nonmatching current voice remains pinned");
+  assert.equal(get("voice").value, "en-US-AriaNeural", "filtering never silently changes the voice");
+  get("voiceSearch").value = "nonexistent"; get("voiceSearch").emit("input");
+  assert.equal(get("voice").children.length, 1, "empty search retains the current voice");
+  assert.match(get("voiceCount").textContent, /^0 \/ 4/);
+  assert.deepEqual(requests, [], "filtering does not generate speech");
+  get("voiceLanguage").value = "en"; get("voiceLanguage").emit("change");
+  get("voiceSearch").value = "加拿大"; get("voiceSearch").emit("input");
+  assert.equal(get("voice").children[1].value, "en-CA-ClaraNeural", "search matches localized locale names");
+  get("voiceLanguage").value = "all"; get("voiceSearch").value = ""; get("voiceSearch").emit("input");
   get("play").emit("click"); await flush();
   assert.equal(audio.src, "/audio/3.mp3", "start at consecutive punctuation then continue");
   assert.equal(audio.paused, false);
@@ -105,6 +123,9 @@ async function run() {
   get("previous").emit("click"); await flush();
   assert.equal(audio.src, "/audio/3.mp3", "previous travels backward across punctuation");
   assert.equal(audio.playbackRate, 0.93, "manual navigation preserves the selected speed");
+  get("voice").value = "en-CA-ClaraNeural"; get("voice").emit("change"); await flush();
+  assert.equal(audio.paused, true, "switching voices preserves paused playback");
+  assert.equal(requests.at(-1), 3, "a newly added voice regenerates the current paragraph");
   audio.currentTime = 2;
   get("rewind").emit("click"); await flush();
   assert.equal(audio.src, "/audio/0.mp3", "rewind crosses consecutive punctuation");

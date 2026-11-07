@@ -41,12 +41,53 @@
   let book = [], indexed = [], index = 2, words = [], wordElements = [];
   let highlighted = -1, revision = 0, controller = null, loading = false, desiredPlay = false;
   let frame = null, loadedVoice = null, stopped = false;
+  let voices = [];
+
+  const languageNames = new Intl.DisplayNames(["zh-CN"], { type: "language" });
+  function voiceLocale(voice) { return voice.locale || (voice.id === "furina-local-en" ? "local" : voice.id.split("-").slice(0, 2).join("-")); }
+  function voiceLabel(voice) {
+    const locale = voiceLocale(voice);
+    const language = locale === "local" ? "本机" : languageNames.of(locale);
+    const gender = { Female:"女声", Male:"男声" }[voice.gender];
+    return [voice.name, language, gender].filter(Boolean).join(" · ");
+  }
+  function filterVoices(preferred) {
+    const current = typeof preferred === "string" ? preferred : $("voice").value;
+    const language = $("voiceLanguage").value || "all";
+    const query = normalize($("voiceSearch").value);
+    const matches = voices.filter(voice => (language === "all" || voiceLocale(voice).split("-")[0] === language)
+      && normalize(`${voiceLabel(voice)} ${voice.id}`).includes(query));
+    const fragment = document.createDocumentFragment();
+    const addOption = (voice, prefix = "") => {
+      const option = document.createElement("option"); option.value = voice.id;
+      option.textContent = prefix + voiceLabel(voice); fragment.append(option);
+    };
+    const selected = voices.find(voice => voice.id === current);
+    if (selected && !matches.includes(selected)) addOption(selected, "当前 · ");
+    matches.forEach(voice => addOption(voice));
+    $("voice").replaceChildren(fragment);
+    if (selected) $("voice").value = current;
+    else if (matches.length) $("voice").value = matches[0].id;
+    $("voiceCount").textContent = `${matches.length} / ${voices.length} 个声音${selected && !matches.includes(selected) ? " · 当前声音已保留" : ""}`;
+  }
+
+  function initializeVoices(data) {
+    voices = data.voices;
+    const fragment = document.createDocumentFragment();
+    const languages = [...new Set(voices.map(voice => voiceLocale(voice).split("-")[0]))].sort();
+    const options = [["all", "全部语言"], ...languages.map(language => [language, language === "local" ? "本机" : languageNames.of(language)])];
+    for (const [value, label] of options) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; fragment.append(option);
+    }
+    $("voiceLanguage").replaceChildren(fragment); $("voiceLanguage").value = "all";
+    filterVoices(data.defaultVoice || "en-US-AriaNeural");
+  }
 
   function setupPlayerVisibility() {
     const player = $("player");
     let pointerY = -1, inside = false, keyboard = false;
     const refresh = () => {
-      const focused = keyboard && player.contains(document.activeElement);
+      const focused = (keyboard || document.activeElement?.id === "voiceSearch") && player.contains(document.activeElement);
       player.classList.toggle("is-visible", playerShouldShow(pointerY, window.innerHeight, inside, focused, player.classList.contains("is-visible")));
     };
     const move = event => { pointerY = event.clientY; inside = player.contains(event.target); refresh(); };
@@ -372,6 +413,8 @@
     updateHighlight();
   });
   $("voice").addEventListener("change", () => { if (audio.src || loading) navigate(index, { autoplay: desiredPlay }); });
+  $("voiceSearch").addEventListener("input", filterVoices);
+  $("voiceLanguage").addEventListener("change", filterVoices);
   $("follow").addEventListener("change", followCurrent);
   $("timeline").addEventListener("input", () => { if (Number.isFinite(audio.duration)) { audio.currentTime = Number($("timeline").value); updateTimeline(); } });
   audio.addEventListener("timeupdate", updateTimeline);
@@ -413,8 +456,7 @@
       index = Math.min(index, book.length - 1);
       $("bookTitle").textContent = data.title;
       $("bookCount").textContent = `${book.length.toLocaleString()} 段中英对照`;
-      for (const voice of data.voices) { const option = document.createElement("option"); option.value = voice.id; option.textContent = voice.name; $("voice").append(option); }
-      if (data.defaultVoice) $("voice").value = data.defaultVoice;
+      initializeVoices(data);
       if (data.diskCache) pollCache();
       renderReading(); status("点击播放，或搜索想开始的位置");
     } catch (error) { status(`载入失败：${error.message}。请确认本地服务已启动后刷新。`); $("connection").textContent = "连接失败"; }

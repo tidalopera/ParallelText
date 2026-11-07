@@ -19,6 +19,7 @@ import unicodedata
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import urlopen
 import edge_tts
+from Voices import load_catalogue
 from SpeechCache import DiskCache, ResourceMonitor, FurinaClient
 from MemoryGuard import MemoryGuard
 
@@ -33,7 +34,10 @@ VOICES = [
     {"id": "en-US-GuyNeural", "name": "Guy · 美式男声"},
     {"id": "en-GB-SoniaNeural", "name": "Sonia · 英式女声"},
 ]
-VOICE_IDS = {v["id"] for v in VOICES}
+_voice_map = {v["id"]: v for v in VOICES}
+_voice_map.update({v["id"]: v for v in load_catalogue()})
+VOICES = list(_voice_map.values())
+VOICE_IDS = set(_voice_map)
 SETTINGS = {}
 QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "—": "-", "–": "-"})
 
