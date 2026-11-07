@@ -141,17 +141,20 @@ class SpeechStore:
                 wanted.append(i)
                 if len(wanted) == count:
                     break
-        keep = {self.key(i, voice) for i in [index, *wanted]}
+        return self.prefetch_plan(index, voice, [{"index": i, "voice": voice} for i in wanted])
+
+    def prefetch_plan(self, index, voice, plan):
+        keep = {self.key(index, voice), *(self.key(item["index"], item["voice"]) for item in plan)}
         with self.lock:
             for key in list(self.entries):
                 if key in self.background and key not in keep and not self.entries[key].done() and self.entries[key].cancel():
                     del self.entries[key]
                     self.background.discard(key)
         scheduled = []
-        for i in wanted:
+        for item in plan:
             try:
-                self.request(i, voice, background=True)
-                scheduled.append(i)
+                self.request(item["index"], item["voice"], background=True)
+                scheduled.append(item["index"])
             except BusyError:
                 break
         return {"state": "scheduled", "indices": scheduled}
@@ -489,6 +492,19 @@ def make_handler(book, store):
                     count = payload.get("count", 6)
                     if type(count) is not int or not 1 <= count <= 8:
                         raise ValueError("Prefetch count must be between 1 and 8")
+                    if "plan" in payload:
+                        plan = payload["plan"]
+                        if not isinstance(plan, list) or len(plan) > count:
+                            raise ValueError("Invalid prefetch plan")
+                        previous = index
+                        for item in plan:
+                            if (not isinstance(item, dict) or set(item) != {"index", "voice"}
+                                or type(item["index"]) is not int or not previous < item["index"] < len(book)
+                                or not isinstance(item["voice"], str) or item["voice"] not in VOICE_IDS
+                                or not has_speech(book[item["index"]]["english"])):
+                                raise ValueError("Invalid prefetch plan item")
+                            previous = item["index"]
+                        return self._json(store.prefetch_plan(index, voice, plan))
                     return self._json(store.prefetch(index, voice, count))
                 self._json(store.request(index, voice))
             except BusyError as error:

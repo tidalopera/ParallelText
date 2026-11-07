@@ -3,13 +3,19 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const { hasSpeech, nextSpeakable } = require("./Reader.js");
+const { hasSpeech, nextSpeakable, advanceRotation, rotationPlan } = require("./Reader.js");
 const paragraphs = ["First.", "...", "\u2026\u2014", "Second.", "***", "Third.", "!!!"].map(english => ({ english, chinese: english, chapter: "Test" }));
 assert.equal(hasSpeech("\u2026\u2026\u2014 * () \ud83d\ude42"), false);
 for (const text of ["0", "No...", "caf\u00e9", "\u6d4b\u8bd5"]) assert.equal(hasSpeech(text), true);
 assert.equal(nextSpeakable(paragraphs, 1), 3);
 assert.equal(nextSpeakable(paragraphs, 4, -1), 3);
 assert.equal(nextSpeakable(paragraphs, 6), -1);
+assert.deepEqual(rotationPlan(paragraphs,0,"a",["a","b"],2,0), [{index:3,voice:"a"},{index:5,voice:"b"}]);
+assert.deepEqual(rotationPlan(paragraphs,0,"a",["a","b"],2,1), [{index:3,voice:"b"},{index:5,voice:"b"}]);
+assert.deepEqual(rotationPlan(paragraphs,0,"c",["a","b","c"],1,0), [{index:3,voice:"a"},{index:5,voice:"b"}]);
+assert.deepEqual(advanceRotation("a",[],1,0),{voice:"a",completed:0});
+assert.deepEqual(advanceRotation("a",["b"],1,0),{voice:"b",completed:0});
+assert.deepEqual(advanceRotation("a",["b"],0,0),{voice:"a",completed:0});
 
 class Element {
   constructor() {
@@ -48,6 +54,7 @@ async function run() {
   };
   get("voice").value = "en-US-AriaNeural";
   get("speed").value = "1";
+  get("voiceEvery").value = "3";
   const doc = new Element();
   Object.assign(doc, { getElementById: get, createElement: () => new Element(), createDocumentFragment: () => new Element(), createTextNode: text => ({ textContent: text }) });
   const win = new Element();
@@ -55,6 +62,7 @@ async function run() {
   let failure = false;
   let expireOnce = false;
   const requests = [];
+  const requestedVoices = [], plans = [];
   const context = {
     document: doc, window: win, console, AbortController, DOMException, setTimeout, clearTimeout, queueMicrotask,
     requestAnimationFrame: () => 1,
@@ -68,12 +76,18 @@ async function run() {
       if (url.startsWith("/api/speech?key=")) return { ok: false, status: 404, json: async () => ({ message:"expired" }) };
       if (url === "/api/prefetch") {
         const { index, count } = JSON.parse(options.body);
+        const { plan } = JSON.parse(options.body);
+        if (plan) {
+          plans.push(plan);
+          assert.ok(plan.length <= count);
+          assert.ok(plan.every(item => item.index > index && hasSpeech(paragraphs[item.index].english)));
+        }
         assert.equal(count, 6);
         assert.equal(hasSpeech(paragraphs[index].english), true);
         return { ok: true, json: async () => ({ state: "scheduled" }) };
       }
       assert.equal(url, "/api/speech");
-      const { index } = JSON.parse(options.body); requests.push(index);
+      const { index, voice } = JSON.parse(options.body); requests.push(index); requestedVoices.push(voice);
       assert.equal(hasSpeech(paragraphs[index].english), true, "must never request punctuation-only speech");
       if (expireOnce) { expireOnce = false; return { ok:true, json:async()=>({state:"pending",key:"stale"}) }; }
       return { ok: true, json: async () => failure ? { state: "error", message: "network test" } : { state: "ready", words: [], audio: `/audio/${index}.mp3` } };
@@ -84,6 +98,8 @@ async function run() {
   const audio = get("audio");
   assert.equal(get("voice").value, "en-US-AriaNeural", "catalogue preserves the configured default");
   assert.equal(get("voice").children.length, 4, "all voices are available initially");
+  get("voiceLanguage").value = "cloud"; get("voiceLanguage").emit("change");
+  assert.equal(get("voice").children.length,3,"cloud rotation excludes the local model");
   get("voiceLanguage").value = "multilingual"; get("voiceLanguage").emit("change");
   assert.equal(get("voice").children.length, 2, "nonmatching current voice remains pinned");
   assert.match(get("voice").children[1].textContent, /支持英文/);
@@ -112,11 +128,19 @@ async function run() {
   assert.equal(audio.playCount, playCount, "speed changes do not restart playback");
   assert.deepEqual(requests, [3], "speed changes reuse existing audio");
   get("speed").value = "1.37"; get("speed").emit("input");
+  get("voiceEvery").value = "1";
+  get("voiceRotation").checked = true; get("voiceRotation").emit("change"); await flush();
+  assert.deepEqual(requests,[3],"enabling rotation does not interrupt the current paragraph");
+  assert.equal(plans.at(-1)[0].index,5,"rotation prefetch skips symbols");
+  assert.equal(plans.at(-1)[0].voice,"en-CA-ClaraNeural","prefetch uses the next voice before the current paragraph ends");
   expireOnce = true;
   audio.paused = true; audio.emit("ended");
   await new Promise(resolve=>setTimeout(resolve,1100)); await flush();
   assert.equal(audio.src, "/audio/5.mp3", "autoplay crosses punctuation");
   assert.equal(audio.playbackRate, 1.37, "autoplay preserves the selected fractional speed");
+  assert.equal(get("voice").value,"en-CA-ClaraNeural","one completed paragraph advances the voice exactly once");
+  assert.equal(requestedVoices.at(-1),"en-CA-ClaraNeural","expired jobs retry the planned voice");
+  get("voiceEvery").value = "2"; get("voiceEvery").emit("change");
   audio.pause();
   get("speed").value = "0.93"; get("speed").emit("input");
   assert.equal(audio.playbackRate, 0.93);
@@ -124,6 +148,9 @@ async function run() {
   get("previous").emit("click"); await flush();
   assert.equal(audio.src, "/audio/3.mp3", "previous travels backward across punctuation");
   assert.equal(audio.playbackRate, 0.93, "manual navigation preserves the selected speed");
+  assert.match(get("rotationStatus").textContent,/本轮 0\/2/,"manual navigation resets rotation count");
+  get("voiceRotation").checked = false; get("voiceRotation").emit("change");
+  assert.match(get("rotationStatus").textContent,/已关闭/);
   get("voice").value = "en-CA-ClaraNeural"; get("voice").emit("change"); await flush();
   assert.equal(audio.paused, true, "switching voices preserves paused playback");
   assert.equal(requests.at(-1), 3, "a newly added voice regenerates the current paragraph");
@@ -146,6 +173,6 @@ async function run() {
   get("play").emit("click"); await flush();
   assert.equal(requests.length, count);
   assert.equal(audio.src, "");
-  console.log("Reader checks passed: continuous speed, symbol-only start/autoplay/previous/seek/end, prefetch, real errors, all-symbol book");
+  console.log("Reader checks passed: voice rotation and planned prefetch, catalogue filters, continuous speed, symbols, seek, retry, errors");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

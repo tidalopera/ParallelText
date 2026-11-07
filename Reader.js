@@ -9,6 +9,20 @@
     }
     return -1;
   };
+  const advanceRotation = (voice, order, every, completed) => {
+    if (!every) return { voice, completed: 0 };
+    if (++completed >= every) return { voice: order.length ? order[(order.indexOf(voice) + 1) % order.length] : voice, completed: 0 };
+    return { voice, completed };
+  };
+  const rotationPlan = (paragraphs, index, voice, order, every, completed, count = 6) => {
+    const plan = [];
+    for (let i = index + 1; i < paragraphs.length && plan.length < count; ++i) {
+      if (!hasSpeech(paragraphs[i].english)) continue;
+      ({ voice, completed } = advanceRotation(voice, order, every, completed));
+      plan.push({ index: i, voice });
+    }
+    return plan;
+  };
   const playerShouldShow = (y, height, inside, focused, visible) => focused || (y >= height - 12 && y <= height) || (visible && inside);
   const centerPosition = (center, height) => ({ padding: Math.max(0, height / 2 - center), scroll: Math.max(0, center - height / 2) });
   const formatTime = seconds => {
@@ -32,7 +46,7 @@
   };
   // Pure functions can be checked in Node without controlling a user's browser.
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { normalize, visibleRange, hasSpeech, nextSpeakable, formatTime, activeWord, findMatches, playerShouldShow, centerPosition };
+    module.exports = { normalize, visibleRange, hasSpeech, nextSpeakable, formatTime, activeWord, findMatches, playerShouldShow, centerPosition, advanceRotation, rotationPlan };
     return;
   }
 
@@ -42,6 +56,7 @@
   let highlighted = -1, revision = 0, controller = null, loading = false, desiredPlay = false;
   let frame = null, loadedVoice = null, stopped = false;
   let voices = [];
+  let rotationCompleted = 0;
 
   const languageNames = new Intl.DisplayNames(["zh-CN"], { type: "language" });
   function voiceLocale(voice) { return voice.locale || (voice.id === "furina-local-en" ? "local" : voice.id.split("-").slice(0, 2).join("-")); }
@@ -55,12 +70,25 @@
     const gender = { Female:"女声", Male:"男声" }[voice.gender];
     return [voice.name, language, voiceGroup(voice) === "multilingual" ? "多语种 · 支持英文" : "", gender].filter(Boolean).join(" · ");
   }
-  function filterVoices(preferred) {
-    const current = typeof preferred === "string" ? preferred : $("voice").value;
+  function matchingVoices() {
     const language = $("voiceLanguage").value || "all";
     const query = normalize($("voiceSearch").value);
-    const matches = voices.filter(voice => (language === "all" || voiceGroup(voice) === language)
+    return voices.filter(voice => (language === "all" || (language === "cloud" && voiceGroup(voice) !== "local") || voiceGroup(voice) === language)
       && normalize(`${voiceLabel(voice)} ${voice.id}`).includes(query));
+  }
+  function rotationEvery() {
+    const n = Number($("voiceEvery").value);
+    return $("voiceRotation").checked && Number.isInteger(n) && n >= 1 && n <= 1000 ? n : 0;
+  }
+  function updateRotation() {
+    const every = rotationEvery();
+    const count = matchingVoices().length;
+    $("rotationStatus").textContent = every ? `本轮 ${rotationCompleted}/${every} 段 · ${count ? `按筛选后的 ${count} 个声音循环` : "无匹配音色，保持当前声音"}` : "自动换声已关闭";
+  }
+  function resetRotation() { rotationCompleted = 0; updateRotation(); }
+  function filterVoices(preferred) {
+    const current = typeof preferred === "string" ? preferred : $("voice").value;
+    const matches = matchingVoices();
     const fragment = document.createDocumentFragment();
     const addOption = (voice, prefix = "") => {
       const option = document.createElement("option"); option.value = voice.id;
@@ -73,6 +101,7 @@
     if (selected) $("voice").value = current;
     else if (matches.length) $("voice").value = matches[0].id;
     $("voiceCount").textContent = `${matches.length} / ${voices.length} 个声音${selected && !matches.includes(selected) ? " · 当前声音已保留" : ""}`;
+    updateRotation();
   }
 
   function initializeVoices(data) {
@@ -80,7 +109,7 @@
     const fragment = document.createDocumentFragment();
     const languages = [...new Set(voices.map(voiceGroup))].sort();
     const labels = { en:"英语地区", multilingual:"多语种", local:"本机" };
-    const options = [["all", "全部音色"], ...languages.map(language => [language, labels[language]])];
+    const options = [["all", "全部音色"], ["cloud", "云端全部"], ...languages.map(language => [language, labels[language]])];
     for (const [value, label] of options) {
       const option = document.createElement("option"); option.value = value; option.textContent = label; fragment.append(option);
     }
@@ -92,7 +121,7 @@
     const player = $("player");
     let pointerY = -1, inside = false, keyboard = false;
     const refresh = () => {
-      const focused = (keyboard || document.activeElement?.id === "voiceSearch") && player.contains(document.activeElement);
+      const focused = (keyboard || ["voiceSearch", "voiceEvery"].includes(document.activeElement?.id)) && player.contains(document.activeElement);
       player.classList.toggle("is-visible", playerShouldShow(pointerY, window.innerHeight, inside, focused, player.classList.contains("is-visible")));
     };
     const move = event => { pointerY = event.clientY; inside = player.contains(event.target); refresh(); };
@@ -260,8 +289,9 @@
     return jsonRequest("/api/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ index: i, voice }), signal });
   }
   function warmAhead(i, voice) {
+    const plan = rotationEvery() ? rotationPlan(book, i, voice, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted) : null;
     return jsonRequest("/api/prefetch", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ index: i, voice, count: 6 }) }).catch(() => {});
+      body: JSON.stringify({ index: i, voice, count: 6, ...(plan ? { plan } : {}) }) }).catch(() => {});
   }
   async function speechReady(i, voice, signal) {
     const deadline = Date.now() + (voice === "furina-local-en" ? 1200000 : 85000);
@@ -312,8 +342,9 @@
     }
   }
 
-  async function navigate(target, { autoplay = true, offset = 0, fromEnd = false } = {}) {
+  async function navigate(target, { autoplay = true, offset = 0, fromEnd = false, automatic = false } = {}) {
     if (!book.length || stopped) return;
+    if (!automatic) resetRotation();
     const ownRevision = ++revision;
     if (controller) controller.abort();
     controller = new AbortController();
@@ -368,7 +399,7 @@
   function togglePlay() {
     if (!book.length || stopped) return;
     if (loading) { desiredPlay = !desiredPlay; updateControls(); status(desiredPlay ? "准备完成后开始播放…" : "准备完成后保持暂停"); return; }
-    if (!audio.src || loadedVoice !== $("voice").value) { navigate(index, { autoplay: true }); return; }
+    if (!audio.src || loadedVoice !== $("voice").value) { navigate(index, { autoplay: true, automatic: true }); return; }
     if (!audio.paused) { desiredPlay = false; audio.pause(); }
     else { desiredPlay = true; playAudio(); }
   }
@@ -417,9 +448,16 @@
     $("speed").setAttribute("aria-valuetext", `${speed.toFixed(2)}倍`);
     updateHighlight();
   });
-  $("voice").addEventListener("change", () => { if (audio.src || loading) navigate(index, { autoplay: desiredPlay }); });
-  $("voiceSearch").addEventListener("input", filterVoices);
-  $("voiceLanguage").addEventListener("change", filterVoices);
+  $("voice").addEventListener("change", () => { resetRotation(); if (audio.src || loading) navigate(index, { autoplay: desiredPlay }); });
+  const refreshPlan = () => { if (book.length && (audio.src || loading)) warmAhead(index, $("voice").value); };
+  const filtersChanged = () => { resetRotation(); filterVoices(); refreshPlan(); };
+  $("voiceSearch").addEventListener("input", filtersChanged);
+  $("voiceLanguage").addEventListener("change", filtersChanged);
+  $("voiceRotation").addEventListener("change", () => { resetRotation(); refreshPlan(); });
+  $("voiceEvery").addEventListener("change", () => {
+    $("voiceEvery").value = String(Math.max(1, Math.min(1000, Math.trunc(Number($("voiceEvery").value) || 1))));
+    resetRotation(); refreshPlan();
+  });
   $("follow").addEventListener("change", followCurrent);
   $("timeline").addEventListener("input", () => { if (Number.isFinite(audio.duration)) { audio.currentTime = Number($("timeline").value); updateTimeline(); } });
   audio.addEventListener("timeupdate", updateTimeline);
@@ -428,8 +466,17 @@
   audio.addEventListener("pause", () => { if (!loading) { desiredPlay = false; updateControls(); status("已暂停"); } updateHighlight(); });
   audio.addEventListener("ended", () => {
     if (loading || stopped) return;
-    if (index + 1 < book.length) navigate(index + 1, { autoplay: true });
-    else { desiredPlay = false; updateControls(); status("全书朗读完成"); }
+    const next = nextSpeakable(book, index + 1);
+    const advanced = advanceRotation($("voice").value, matchingVoices().map(v => v.id), rotationEvery(), rotationCompleted);
+    rotationCompleted = advanced.completed;
+    if (next >= 0) {
+      filterVoices(advanced.voice);
+      navigate(next, { autoplay: true, automatic: true });
+    } else {
+      index = book.length - 1; words = []; loadedVoice = null; desiredPlay = false;
+      audio.removeAttribute("src"); audio.load();
+      renderReading(); updateTimeline(); updateRotation(); updateControls(); status("全书朗读完成");
+    }
   });
   audio.addEventListener("error", () => { if (!loading && !stopped && audio.src) { desiredPlay = false; loadedVoice = null; updateControls(); status("音频播放失败，点击播放重新生成本段。"); } });
   document.addEventListener("keydown", event => {

@@ -56,6 +56,8 @@
           </div>
           <label><span class="sr-only">声音</span><select id="voice" aria-label="声音"></select></label>
           <span id="voiceCount" class="voice-count" role="status"></span>
+          <label class="voice-rotation"><input id="voiceRotation" type="checkbox"> 每 <input id="voiceEvery" type="number" min="1" max="1000" step="1" value="3" aria-label="每读多少段更换声音"> 段换下一个声音</label>
+          <span id="rotationStatus" class="voice-count" role="status">自动换声已关闭</span>
         </div>
         <label class="speed-control"><span class="sr-only">语速</span><input id="speed" type="range" min="0.5" max="2" step="0.01" value="1" aria-label="语速" aria-valuetext="1.00倍"><output id="speedValue" for="speed">1.00×</output></label>
       </div>

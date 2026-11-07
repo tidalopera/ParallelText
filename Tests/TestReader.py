@@ -10,6 +10,42 @@ import Reader as r
 
 
 class ReaderTests(unittest.TestCase):
+    def test_prefetch_plan_uses_each_paragraph_voice(self):
+        with TemporaryDirectory() as directory:
+            store = r.SpeechStore([{"english":"Words"} for _ in range(4)], Path(directory))
+            try:
+                plan = [{"index":1,"voice":"one"},{"index":3,"voice":"two"}]
+                with patch.object(store,"request",return_value={"state":"pending"}) as request:
+                    self.assertEqual(store.prefetch_plan(0,"one",plan)["indices"],[1,3])
+                    self.assertEqual([(c.args,c.kwargs) for c in request.call_args_list],
+                                     [((1,"one"),{"background":True}),((3,"two"),{"background":True})])
+            finally:
+                store.close()
+
+    def test_http_prefetch_plan_validation(self):
+        book = [{"index":i,"english":text,"chinese":text,"chapter":"Test"} for i,text in enumerate(["Now","...","Next","Last"])]
+        voice = "en-US-AriaNeural"
+        with TemporaryDirectory() as directory:
+            store = r.SpeechStore(book,Path(directory))
+            server = r.ThreadingHTTPServer(("127.0.0.1",0),r.make_handler(book,store))
+            port = server.server_address[1]
+            with patch.object(r,"PORT",port), patch.object(store,"prefetch_plan",return_value={"state":"scheduled"}) as prefetch:
+                thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+                def send(plan):
+                    payload = json.dumps({"index":0,"voice":voice,"count":6,"plan":plan}).encode()
+                    return urlopen(Request(f"http://127.0.0.1:{port}/api/prefetch",data=payload,headers={"Content-Type":"application/json"}),timeout=3)
+                try:
+                    plan = [{"index":2,"voice":voice},{"index":3,"voice":"en-CA-ClaraNeural"}]
+                    with send(plan) as response:self.assertEqual(response.status,200)
+                    prefetch.assert_called_once_with(0,voice,plan)
+                    for invalid in ([{"index":1,"voice":voice}], [{"index":2,"voice":"invalid"}],
+                                    [{"index":True,"voice":voice}], list(reversed(plan)), plan*4):
+                        with self.assertRaises(HTTPError) as error:send(invalid)
+                        self.assertEqual(error.exception.code,400)
+                    self.assertEqual(prefetch.call_count,1)
+                finally:
+                    server.shutdown();server.server_close();thread.join(timeout=3);store.close()
+
     def test_prefetch_looks_ahead_over_symbols(self):
         book = [{"english": text} for text in ["Now", "...", "One", "Two", "!", "Three", "Four", "Five", "Six", "Seven"]]
         with TemporaryDirectory() as directory:
