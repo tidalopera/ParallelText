@@ -57,11 +57,14 @@ Merge these optional keys into your ignored local `Config.json`:
   "defaultVoice": "furina-local-en",
   "startChapter": 1,
   "prepareChapter": 1,
+  "ttsAutoStart": false,
   "speechCacheBytes": 1000000000
 }
 ```
 
 Local background preparation continues toward the end until the disk budget is nearly full, preserving unread audio and rolling out consumed entries as playback advances. Set `furinaPidFile` to the model service's PID file to exclude that process's own GPU counters from other-workload checks. Cached audio survives restarts; the preparation job skips valid files when resuming.
+
+TTS does not start automatically when the reader opens or restarts. The model supervisor starts only when local synthesis or explicitly requested local preparation needs it; cached playback and cloud voices do not load the local model. Startup repairs and chapter preparation require the explicit private setting `ttsAutoStart: true` (default false). Clicking Play still enables generation and playback prefetch for the selected voices.
 
 Local synthesis continues when available RAM is at least 500,000,000 bytes (0.5 GB). CPU and other-process GPU readings are informational, not pause gates. When trusted `furinaStartScript`, `furinaStopScript` and `furinaPidFile` paths are configured in local settings, a hidden supervisor stops the model service below that threshold, including an in-flight request if necessary, so its process allocations are released. Cached audio remains playable. The unfinished chunk is retried after reloading. Without those service-control paths, generation waits below the threshold but cannot unload an externally managed service.
 

@@ -322,7 +322,6 @@ class CachedSpeechStore(SpeechStore):
         self.client = FurinaClient(self.settings.get("furinaUrl", "http://127.0.0.1:9880"), self.monitor, self.stopped)
         self.guard = MemoryGuard(self.settings,self.stopped,self.directory/"ModelState.json")
         self.client.guard = self.guard
-        self.guard.start()
         self.preparation = {"state": "idle", "done": 0}
         self.preparing = None
         self.repairs = {"state":"idle", "done":0, "total":0}
@@ -362,6 +361,7 @@ class CachedSpeechStore(SpeechStore):
 
     def _generate(self, index, voice, key):
         if voice == "furina-local-en":
+            self.guard.start()
             # The backend serializes model execution; never pile requests into it.
             background = key in self.background or key != self.current_key
             stats = self.client.generate(self.book[index]["english"], self.directory/(key+".wav"), background)
@@ -447,6 +447,7 @@ class CachedSpeechStore(SpeechStore):
                             if self.cache.stats()["bytes"]+estimate > self.cache.limit:
                                 state["state"] = "cache-full"
                                 return
+                            if voice == "furina-local-en": self.guard.start()
                             while self.monitor.sample()["busy"] or self.guard.waiting():
                                 state["state"] = "paused-resources"
                                 if self.stopped.wait(2): return
@@ -650,15 +651,16 @@ def main():
         print(f"Already running: http://127.0.0.1:{PORT}")
         return
     store = CachedSpeechStore(book, BASE / "Work" / "Speech", SETTINGS)
-    repairs_file = BOOK / "Speechrepairs.json"
-    if repairs_file.exists():
-        store.start_repairs(json.loads(repairs_file.read_text("utf-8-sig")))
-    if SETTINGS.get("prepareChapter"):
-        start = next((i for i,p in enumerate(book) if re.match(rf"^Chapter {SETTINGS['prepareChapter']}\b",p["english"])), None)
-        if start is not None:
-            store.anchor = start
-            store.monitor.sample()
-            store.start_preparation(start, SETTINGS.get("defaultVoice", "furina-local-en"))
+    if SETTINGS.get("ttsAutoStart", False) is True:
+        repairs_file = BOOK / "Speechrepairs.json"
+        if repairs_file.exists():
+            store.start_repairs(json.loads(repairs_file.read_text("utf-8-sig")))
+        if SETTINGS.get("prepareChapter"):
+            start = next((i for i,p in enumerate(book) if re.match(rf"^Chapter {SETTINGS['prepareChapter']}\b",p["english"])), None)
+            if start is not None:
+                store.anchor = start
+                store.monitor.sample()
+                store.start_preparation(start, SETTINGS.get("defaultVoice", "furina-local-en"))
     try:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(book, store))
         server.daemon_threads = True

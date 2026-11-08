@@ -57,7 +57,7 @@ class MemoryGuard:
         self.retry_after=0
         self.loading_started=0
         self.last_resident=0
-        self.status={"state":"resident" if self.enabled else "unmanaged", "released":False,
+        self.status={"state":"idle" if self.enabled else "unmanaged", "released":False,
                      "loading":False,"lowMemoryBytes":LOW_MEMORY_BYTES,"reloadRequiredBytes":LOW_MEMORY_BYTES}
         self.thread=None
         if self.enabled and self.state_path.exists():
@@ -146,17 +146,22 @@ class MemoryGuard:
                 elif (health and health.get("error")) or self.clock()-self.loading_started>180:
                     self.release()
                     self.status["message"]="Model loading failed; retrying after memory recovery"
+            elif not self.status["released"]:
+                self.status["state"]="resident"
 
     def start(self):
-        if not self.enabled:return
+        if not self.enabled or self.stopped.is_set():return
         def run():
             while not self.stopped.is_set():
                 try:self.tick()
                 except Exception as error:
                     self.status.update(state="error",message=type(error).__name__+": "+str(error))
                 self.stopped.wait(1)
-        self.thread=threading.Thread(target=run,daemon=True,name="ModelMemoryGuard")
-        self.thread.start()
+        with self.lock:
+            if self.thread and self.thread.is_alive():return
+            if not self.status["released"]: self.status["state"]="starting"
+            self.thread=threading.Thread(target=run,daemon=True,name="ModelMemoryGuard")
+            self.thread.start()
 
     def waiting(self):
-        return self.enabled and (self.status["released"] or self.status["loading"] or self.status["state"] in ("releasing-memory","error"))
+        return self.enabled and (self.status["released"] or self.status["loading"] or self.status["state"] in ("starting","releasing-memory","error"))

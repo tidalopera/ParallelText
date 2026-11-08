@@ -10,6 +10,21 @@ from SpeechCache import DiskCache, FurinaClient
 
 
 class CacheTests(unittest.TestCase):
+    def test_model_guard_is_lazy_and_cloud_generation_does_not_start_it(self):
+        with TemporaryDirectory() as directory, patch.object(r.MemoryGuard,"start") as start:
+            store=r.CachedSpeechStore([{"english":"Words"}],Path(directory))
+            try:
+                start.assert_not_called()
+                self.assertEqual(store.preparation["state"],"idle")
+                self.assertEqual(store.repairs["state"],"idle")
+                with patch.object(r.SpeechStore,"_generate",return_value={"audio":"/audio/test.mp3"}), patch.object(store.cache,"put"):
+                    store._generate(0,"en-US-AriaNeural","test")
+                    start.assert_not_called()
+                    with patch.object(store.client,"generate",return_value={}):
+                        store._generate(0,"furina-local-en","test")
+                    start.assert_called_once()
+            finally:store.close()
+
     def test_evicted_audio_is_regenerated_instead_of_reusing_stale_future(self):
         with TemporaryDirectory() as directory:
             store=r.CachedSpeechStore([{"english":"Test words."}],Path(directory))

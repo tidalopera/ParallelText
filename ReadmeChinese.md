@@ -23,7 +23,9 @@ uv run python Reader.py
 
 在线声音提前准备后面20个可朗读段落，Edge后台默认2路、可配置到4路，与前台及芙宁娜单路任务隔离。音频落盘保存在 `Work/Speech/`，重启后复用，默认按 1GB 上限滚动淘汰。
 
-可选的 Furina 本机声音复用已有模型服务，不安装模型依赖。它不提供逐词时间戳，原在线语音路径保留。配置 `furinaUrl`、`defaultVoice: "furina-local-en"`、`startChapter` 和 `prepareChapter` 后，后台从指定章持续准备，直到缓存接近 1GB 或全文末尾。
+可选的 Furina 本机声音复用已有模型服务，不安装模型依赖。它不提供逐词时间戳，原在线语音路径保留。明确开启自动生成，并配置 `furinaUrl`、`defaultVoice: "furina-local-en"`、`startChapter` 和 `prepareChapter` 后，后台从指定章持续准备，直到缓存接近 1GB 或全文末尾。
+
+打开或重启阅读器时默认不启动TTS，不自动修复或预生成音频。只有本机声音确需生成，或明确请求本机预生成时，才启动模型监管；只读缓存或使用云端声音不会加载本机模型。若确需恢复启动时修复和章节预生成，须在私有配置中明确设置 `ttsAutoStart: true`（默认false）。手动点击播放后，所选声音仍可按原规则生成并预取。
 
 可用内存达到0.5GB就继续生成，CPU/GPU使用率仅供显示。配置本地可信的 `furinaStartScript`、`furinaStopScript` 和 `furinaPidFile` 后，低于0.5GB时会退出模型服务、释放其进程内存；磁盘音频保留。恢复后重新加载并重试未完成的小段。没有启停脚本配置时，只能等待内存恢复，不能卸载外部服务。
 
